@@ -11,7 +11,8 @@ fn main() {
     let mut pwd = PathBuf::from("/");
     let mut input = String::new();
 
-    println!("Welcome to Antmicro's WASM shell!\nAvailable (and working) commands are:\ncd, pwd, write, exit, duk, shell, cowsay, rustpython, \nuutils (ls, cat, echo, env, basename, dirname, sum, printf, wc, rm, mv, touch, cp, mkdir, rmdir)");
+    // TODO: fetch program list from PATH bin directories
+    println!("Welcome to Antmicro's WASM shell!\nAvailable (and working) commands are:\ncd, pwd, write, exit, duk, shell, cowsay, python, \nuutils (ls, cat, echo, env, basename, dirname, sum, printf, wc, rm, mv, touch, cp, mkdir, rmdir)");
 
     loop {
         // prompt for input
@@ -112,8 +113,9 @@ fn main() {
                 // get PATH env varaible, split it and look for binaries in each directory
                 for bin_dir in env::var("PATH").unwrap_or_default().split(":") {
                     let bin_dir = PathBuf::from(bin_dir);
-                    if bin_dir.join(format!("{}.wasm", command)).is_file() {
-                        match File::open(format!("!{} {}", command, input)) {
+                    let fullpath = bin_dir.join(format!("{}.wasm", command));
+                    if fullpath.is_file() {
+                        match File::open(format!("!{} {}", fullpath.display(), input)) {
                             Ok(_) => {}  // doesn't happen for now
                             Err(_) => {} // we return error even on successful spawn
                         }
