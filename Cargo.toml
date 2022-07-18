@@ -26,3 +26,6 @@ version = "0.5.13"
 [profile]
 [profile.release]
 opt-level = "s"
+
+[target.'cfg(not(target_os = "wasi"))'.dependencies]
+command-fds = "0.2.2"

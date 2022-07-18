@@ -5,12 +5,16 @@ use std::fs::{File, OpenOptions};
 use std::io;
 use std::io::ErrorKind;
 use std::io::{BufRead, BufReader, Read, Write};
+#[cfg(not(target_os = "wasi"))]
+use std::os::unix::io::AsRawFd;
 use std::path::PathBuf;
 use std::process::exit;
 use std::thread;
 use std::time::Duration;
 
 use color_eyre::Report;
+#[cfg(not(target_os = "wasi"))]
+use command_fds::{CommandFdExt, FdMapping};
 use conch_parser::lexer::Lexer;
 use conch_parser::parse::DefaultParser;
 use iterm2;
@@ -86,7 +90,7 @@ pub fn syscall(
     args: &[&str],
     env: &HashMap<String, String>,
     background: bool,
-    #[allow(unused_variables)] redirects: &[Redirect],
+    redirects: &[Redirect],
 ) -> Result<SyscallResult, Report> {
     #[cfg(target_os = "wasi")]
     let result = {
@@ -131,9 +135,49 @@ pub fn syscall(
     #[cfg(not(target_os = "wasi"))]
     let result = {
         if command == "spawn" {
+            let mut fd_mappings = Vec::new();
+            let mut opened_files = Vec::new();
+
+            for redirect in redirects.iter() {
+                let (file, child_fd) = match redirect {
+                    Redirect::Read((fd, path)) => {
+                        let file = OpenOptions::new()
+                            .read(true)
+                            .open(path)
+                            .unwrap();
+                        (file, (*fd as i32))
+                    },
+                    Redirect::Write((fd, path)) => {
+                        let file = OpenOptions::new()
+                            .write(true)
+                            .truncate(true)
+                            .create(true)
+                            .open(path)
+                            .unwrap();
+                        (file, (*fd as i32))
+                    },
+                    Redirect::Append((fd, path)) => {
+                        let file = OpenOptions::new()
+                            .write(true)
+                            .append(true)
+                            .create(true)
+                            .open(path)
+                            .unwrap();
+                        (file, (*fd as i32))
+                    },
+                };
+                fd_mappings.push(FdMapping {
+                    parent_fd: file.as_raw_fd(),
+                    child_fd 
+                });
+                opened_files.push(file);
+            }
+
             let mut spawned = std::process::Command::new(args[0])
                 .args(&args[1..])
                 .envs(env)
+                .fd_mappings(fd_mappings)
+                .unwrap()
                 .spawn()
                 .unwrap();
             // TODO: add redirects
