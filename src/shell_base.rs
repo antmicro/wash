@@ -19,6 +19,8 @@ use conch_parser::lexer::Lexer;
 use conch_parser::parse::DefaultParser;
 use iterm2;
 use lazy_static::lazy_static;
+#[cfg(not(target_os = "wasi"))]
+use os_pipe::{PipeReader, PipeWriter};
 use regex::Regex;
 use serde::{Serialize, Serializer};
 use serde::ser::SerializeStruct;
@@ -53,6 +55,7 @@ pub struct SyscallResult {
     pub output: String,
 }
 
+#[cfg(target_os = "wasi")]
 #[derive(Debug, Clone)]
 pub enum Redirect {
     Read((Fd, SerializedPath)),
@@ -60,6 +63,7 @@ pub enum Redirect {
     Append((Fd, SerializedPath)),
 }
 
+#[cfg(target_os = "wasi")]
 impl Serialize for Redirect {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error> where S: Serializer {
         let mut state = serializer.serialize_struct("Redirect", 3)?;
@@ -82,6 +86,17 @@ impl Serialize for Redirect {
         }
         state.end()
     }
+}
+
+#[cfg(not(target_os = "wasi"))]
+#[derive(Debug)]
+pub enum Redirect {
+    Read((Fd, SerializedPath)),
+    Write((Fd, SerializedPath)),
+    Append((Fd, SerializedPath)),
+    PipeIn(PipeReader),
+    PipeOut(PipeWriter),
+    // TODO: Add stderr pipelining
 }
 
 // communicate with the worker thread
@@ -135,8 +150,30 @@ pub fn syscall(
     #[cfg(not(target_os = "wasi"))]
     let result = {
         if command == "spawn" {
-            let mut fd_mappings = Vec::new();
+            let mut pipeline = Vec::new();
+            let mut fds_mappings = Vec::new();
             let mut opened_files = Vec::new();
+
+            let mut child = std::process::Command::new(args[0]);
+            child.args(&args[1..])
+                .envs(env);
+
+            for redirect in redirects.iter() {
+                let (parent_fd, child_fd) = match redirect {
+                    Redirect::PipeIn(pipe) => {
+                        (pipe.as_raw_fd(), STDIN as i32)
+                    },
+                    Redirect::PipeOut(pipe) => {
+                        (pipe.as_raw_fd(), STDOUT as i32)
+                    },
+                    // TODO: bash allow to pipeline stderr too
+                    _ => continue,
+                };
+                pipeline.push(FdMapping {
+                    parent_fd,
+                    child_fd,
+                });
+            }
 
             for redirect in redirects.iter() {
                 let (file, child_fd) = match redirect {
@@ -165,22 +202,22 @@ pub fn syscall(
                             .unwrap();
                         (file, (*fd as i32))
                     },
+                    _ => continue,
                 };
-                fd_mappings.push(FdMapping {
+                fds_mappings.push(FdMapping {
                     parent_fd: file.as_raw_fd(),
                     child_fd 
                 });
                 opened_files.push(file);
             }
-
-            let mut spawned = std::process::Command::new(args[0])
-                .args(&args[1..])
-                .envs(env)
-                .fd_mappings(fd_mappings)
-                .unwrap()
+            let mut spawned = child
+                .fd_mappings(pipeline)
+                .expect("Could not apply pipeline")
+                .fd_mappings(fds_mappings)
+                .expect("Could not apply redirects")
                 .spawn()
                 .unwrap();
-            // TODO: add redirects
+
             if !background {
                 let exit_status = spawned.wait().unwrap().code().unwrap();
                 SyscallResult {
@@ -1143,6 +1180,7 @@ impl Shell {
                             };
                             args.insert(0, binary_path);
                             let args_: Vec<&str> = args.iter().map(|s| &**s).collect();
+                            #[cfg(target_os = "wasi")]
                             // TODO: how does this interact with stdin redirects inside the script?
                             let mut redirects = redirects.clone();
                             redirects.push(Redirect::Read((

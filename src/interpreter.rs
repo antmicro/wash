@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::env;
 use std::fs;
+use std::io::prelude::*;
 use std::path::PathBuf;
 
 use conch_parser::ast;
@@ -71,41 +72,79 @@ fn handle_pipe(
     cmds: &[ast::DefaultPipeableCommand],
     background: bool,
 ) -> i32 {
-    handle_pipeable_command(
-        shell,
-        &cmds[0],
-        background,
-        // TODO: name of the virtual file should be uniquely generated
-        // TODO: add virtual mode that won't create files but in-memory strings
-        &mut vec![Redirect::Write((STDOUT, "/proc/pipe0.txt".to_string()))],
-    );
-
-    for (i, cmd) in cmds.iter().enumerate().skip(1).take(cmds.len() - 2) {
+    #[cfg(target_os = "wasi")]
+    let exit_status = {
         handle_pipeable_command(
             shell,
-            cmd,
+            &cmds[0],
             background,
-            &mut vec![
-                Redirect::Read((STDIN, format!("/proc/pipe{}.txt", i - 1))),
-                Redirect::Write((STDOUT, format!("/proc/pipe{}.txt", i))),
-            ],
+            // TODO: name of the virtual file should be uniquely generated
+            // TODO: add virtual mode that won't create files but in-memory strings
+            &mut vec![Redirect::Write((STDOUT, "/proc/pipe0.txt".to_string()))],
         );
-    }
 
-    let exit_status = handle_pipeable_command(
-        shell,
-        cmds.last().unwrap(),
-        background,
-        &mut vec![Redirect::Read((
-            STDIN,
-            format!("/proc/pipe{}.txt", cmds.len() - 2),
-        ))],
-    );
+        for (i, cmd) in cmds.iter().enumerate().skip(1).take(cmds.len() - 2) {
+            handle_pipeable_command(
+                shell,
+                cmd,
+                background,
+                &mut vec![
+                    Redirect::Read((STDIN, format!("/proc/pipe{}.txt", i - 1))),
+                    Redirect::Write((STDOUT, format!("/proc/pipe{}.txt", i))),
+                ],
+            );
+        }
 
-    // TODO: temporary solution before in-memory files get implemented
-    for i in 0..cmds.len() - 1 {
-        fs::remove_file(format!("/proc/pipe{}.txt", i)).unwrap();
-    }
+        let exit_status = handle_pipeable_command(
+            shell,
+            cmds.last().unwrap(),
+            background,
+            &mut vec![Redirect::Read((
+                STDIN,
+                format!("/proc/pipe{}.txt", cmds.len() - 2),
+            ))],
+        );
+
+        // TODO: temporary solution before in-memory files get implemented
+        for i in 0..cmds.len() - 1 {
+            fs::remove_file(format!("/proc/pipe{}.txt", i)).unwrap();
+        }
+        exit_status
+    };
+
+    #[cfg(not(target_os = "wasi"))]
+    let exit_status = {
+        let (mut reader, mut writer) = os_pipe::pipe().unwrap();
+        handle_pipeable_command(
+            shell,
+            &cmds[0],
+            background,
+            &mut vec![Redirect::PipeOut(writer)],
+        );
+
+        for cmd in cmds.iter().skip(1).take(cmds.len() - 2) {
+            let prev_reader = reader;
+            (reader, writer) = os_pipe::pipe().unwrap();
+            handle_pipeable_command(
+                shell,
+                cmd,
+                background,
+                &mut vec![
+                    Redirect::PipeIn(prev_reader),
+                    Redirect::PipeOut(writer),
+                ],
+            );
+        }
+
+        let exit_status = handle_pipeable_command(
+            shell,
+            cmds.last().unwrap(),
+            background,
+            &mut vec![Redirect::PipeIn(reader)],
+        );
+
+        exit_status
+    };
 
     // if ! was present at the beginning of the pipe, return logical negation of last command status
     if negate {
