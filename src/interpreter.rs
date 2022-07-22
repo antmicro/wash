@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::env;
+#[cfg(target_os = "wasi")]
 use std::fs;
-use std::io::prelude::*;
 use std::path::PathBuf;
 
 use conch_parser::ast;
@@ -262,6 +262,7 @@ fn handle_redirect_type(
 ) -> Option<Redirect> {
     match redirect_type {
         ast::Redirect::Write(file_descriptor, top_level_word) => {
+            // TODO: check noclobber option is set
             let file_descriptor = file_descriptor.unwrap_or(STDOUT);
             if let Some(mut filename) = handle_top_level_word(shell, top_level_word) {
                 if !filename.starts_with('/') {
@@ -274,7 +275,7 @@ fn handle_redirect_type(
             } else {
                 None
             }
-        }
+        },
         ast::Redirect::Append(file_descriptor, top_level_word) => {
             let file_descriptor = file_descriptor.unwrap_or(STDOUT);
             if let Some(mut filename) = handle_top_level_word(shell, top_level_word) {
@@ -288,7 +289,7 @@ fn handle_redirect_type(
             } else {
                 None
             }
-        }
+        },
         ast::Redirect::Read(file_descriptor, top_level_word) => {
             let file_descriptor = file_descriptor.unwrap_or(STDIN);
             if let Some(mut filename) = handle_top_level_word(shell, top_level_word) {
@@ -302,11 +303,49 @@ fn handle_redirect_type(
             } else {
                 None
             }
-        }
+        },
+        #[cfg(not(target_os = "wasi"))]
+        ast::Redirect::ReadWrite(file_descriptor, top_level_word) => {
+            let file_descriptor = file_descriptor.unwrap_or(STDIN);
+            if let Some(mut filename) = handle_top_level_word(shell, top_level_word) {
+                if !filename.starts_with('/') {
+                    filename = PathBuf::from(&shell.pwd)
+                        .join(&filename)
+                        .display()
+                        .to_string()
+                }
+                Some(Redirect::ReadWrite((file_descriptor, filename)))
+            } else {
+                None
+            }
+        },
+        #[cfg(not(target_os = "wasi"))]
+        ast::Redirect::Clobber(file_descriptor, top_level_word) => {
+            let file_descriptor = file_descriptor.unwrap_or(STDOUT);
+            if let Some(mut filename) = handle_top_level_word(shell, top_level_word) {
+                if !filename.starts_with('/') {
+                    filename = PathBuf::from(&shell.pwd)
+                        .join(&filename)
+                        .display()
+                        .to_string()
+                }
+                Some(Redirect::Write((file_descriptor, filename)))
+            } else {
+                None
+            }
+        },
+        #[cfg(not(target_os = "wasi"))]
+        ast::Redirect::DupRead(file_descriptor, top_level_word) => {
+            None
+        },
+        #[cfg(not(target_os = "wasi"))]
+        ast::Redirect::DupWrite(_, _) => {
+            None
+        },
         any => {
             eprintln!("Redirect not yet handled: {:?}", any);
             None
-        }
+        },
     }
 }
 

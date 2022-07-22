@@ -22,7 +22,9 @@ use lazy_static::lazy_static;
 #[cfg(not(target_os = "wasi"))]
 use os_pipe::{PipeReader, PipeWriter};
 use regex::Regex;
+#[cfg(target_os = "wasi")]
 use serde::{Serialize, Serializer};
+#[cfg(target_os = "wasi")]
 use serde::ser::SerializeStruct;
 #[cfg(target_os = "wasi")]
 use serde_json::json;
@@ -94,9 +96,11 @@ pub enum Redirect {
     Read((Fd, SerializedPath)),
     Write((Fd, SerializedPath)),
     Append((Fd, SerializedPath)),
+    ReadWrite((Fd, SerializedPath)),
     PipeIn(PipeReader),
     PipeOut(PipeWriter),
-    // TODO: Add stderr pipelining
+    DupRead(),
+    DupWrite(),
 }
 
 // communicate with the worker thread
@@ -151,7 +155,6 @@ pub fn syscall(
     let result = {
         if command == "spawn" {
             let mut pipeline = Vec::new();
-            let mut fds_mappings = Vec::new();
             let mut opened_files = Vec::new();
 
             let mut child = std::process::Command::new(args[0]);
@@ -166,7 +169,6 @@ pub fn syscall(
                     Redirect::PipeOut(pipe) => {
                         (pipe.as_raw_fd(), STDOUT as i32)
                     },
-                    // TODO: bash allow to pipeline stderr too
                     _ => continue,
                 };
                 pipeline.push(FdMapping {
@@ -174,6 +176,8 @@ pub fn syscall(
                     child_fd,
                 });
             }
+
+            child.fd_mappings(pipeline).expect("Could not apply pipeline");
 
             for redirect in redirects.iter() {
                 let (file, child_fd) = match redirect {
@@ -202,20 +206,24 @@ pub fn syscall(
                             .unwrap();
                         (file, (*fd as i32))
                     },
+                    Redirect::ReadWrite((fd, path)) => {
+                        let file = OpenOptions::new()
+                            .read(true)
+                            .write(true)
+                            .create(true)
+                            .open(path)
+                            .unwrap();
+                        (file, (*fd as i32))
+                    },
                     _ => continue,
                 };
-                fds_mappings.push(FdMapping {
+                child.fd_mappings(vec![FdMapping {
                     parent_fd: file.as_raw_fd(),
                     child_fd 
-                });
+                }]).expect("Could not apply file descriptor mapping.");
                 opened_files.push(file);
             }
-            let mut spawned = child
-                .fd_mappings(pipeline)
-                .expect("Could not apply pipeline")
-                .fd_mappings(fds_mappings)
-                .expect("Could not apply redirects")
-                .spawn()
+            let mut spawned = child.spawn()
                 .unwrap();
 
             if !background {

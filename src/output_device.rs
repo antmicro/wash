@@ -1,6 +1,7 @@
 use std::fs;
 use std::fs::OpenOptions;
 use std::io::Write;
+#[cfg(target_os = "wasi")]
 use std::path::Path;
 
 use color_eyre::Report;
