@@ -149,24 +149,23 @@ impl OutputDevice {
                         fs::write(file, output)?;
                         is_redirected = true;
                     }
-                }
+                },
                 Redirect::Append((fd, file)) => {
                     if *fd == to_fd {
                         let mut file = OpenOptions::new().write(true).append(true).open(file)?;
                         write!(file, "{}", output)?;
                         is_redirected = true;
                     }
-                }
+                },
                 Redirect::PipeOut(pipe) => {
                     if to_fd == STDOUT {
                         pipe.write(format!("{}", output).as_bytes()).unwrap();
                         is_redirected = true;
                     }
-                }
-                // TODO: stderr case
-
-                // TODO: Control must not enter here, maybe panic? 
-                _ => {}
+                },
+                _ => {
+                    // TODO: Control must not enter here, maybe panic? 
+                },
             }
         }
 

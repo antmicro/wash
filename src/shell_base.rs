@@ -7,6 +7,8 @@ use std::io::ErrorKind;
 use std::io::{BufRead, BufReader, Read, Write};
 #[cfg(not(target_os = "wasi"))]
 use std::os::unix::io::AsRawFd;
+#[cfg(not(target_os = "wasi"))]
+use std::os::unix::prelude::{CommandExt, RawFd};
 use std::path::PathBuf;
 use std::process::exit;
 use std::thread;
@@ -19,6 +21,8 @@ use conch_parser::lexer::Lexer;
 use conch_parser::parse::DefaultParser;
 use iterm2;
 use lazy_static::lazy_static;
+#[cfg(not(target_os = "wasi"))]
+use libc;
 #[cfg(not(target_os = "wasi"))]
 use os_pipe::{PipeReader, PipeWriter};
 use regex::Regex;
@@ -99,8 +103,9 @@ pub enum Redirect {
     ReadWrite((Fd, SerializedPath)),
     PipeIn(PipeReader),
     PipeOut(PipeWriter),
-    DupRead(),
-    DupWrite(),
+    DupRead((Fd, Fd)),
+    DupWrite((Fd, Fd)),
+    Close(Fd),
 }
 
 // communicate with the worker thread
@@ -154,39 +159,40 @@ pub fn syscall(
     #[cfg(not(target_os = "wasi"))]
     let result = {
         if command == "spawn" {
-            let mut pipeline = Vec::new();
+            let mut fd_redirections = HashMap::from([
+                (STDIN as RawFd, STDIN as RawFd),
+                (STDOUT as RawFd, STDOUT as RawFd),
+                (STDERR as RawFd, STDERR as RawFd),
+            ]);
             let mut opened_files = Vec::new();
 
             let mut child = std::process::Command::new(args[0]);
             child.args(&args[1..])
                 .envs(env);
 
+            // In bash pipeline redirections are done before rest of them
             for redirect in redirects.iter() {
                 let (parent_fd, child_fd) = match redirect {
                     Redirect::PipeIn(pipe) => {
-                        (pipe.as_raw_fd(), STDIN as i32)
+                        (pipe.as_raw_fd(), STDIN as RawFd)
                     },
                     Redirect::PipeOut(pipe) => {
-                        (pipe.as_raw_fd(), STDOUT as i32)
+                        (pipe.as_raw_fd(), STDOUT as RawFd)
                     },
                     _ => continue,
                 };
-                pipeline.push(FdMapping {
-                    parent_fd,
-                    child_fd,
-                });
+
+                fd_redirections.insert(child_fd, parent_fd);
             }
 
-            child.fd_mappings(pipeline).expect("Could not apply pipeline");
-
             for redirect in redirects.iter() {
-                let (file, child_fd) = match redirect {
+                let (parent_fd, child_fd, file) = match redirect {
                     Redirect::Read((fd, path)) => {
                         let file = OpenOptions::new()
                             .read(true)
                             .open(path)
                             .unwrap();
-                        (file, (*fd as i32))
+                        (file.as_raw_fd(), (*fd as RawFd), Some(file))
                     },
                     Redirect::Write((fd, path)) => {
                         let file = OpenOptions::new()
@@ -195,7 +201,7 @@ pub fn syscall(
                             .create(true)
                             .open(path)
                             .unwrap();
-                        (file, (*fd as i32))
+                        (file.as_raw_fd(), (*fd as RawFd), Some(file))
                     },
                     Redirect::Append((fd, path)) => {
                         let file = OpenOptions::new()
@@ -204,7 +210,7 @@ pub fn syscall(
                             .create(true)
                             .open(path)
                             .unwrap();
-                        (file, (*fd as i32))
+                        (file.as_raw_fd(), (*fd as RawFd), Some(file))
                     },
                     Redirect::ReadWrite((fd, path)) => {
                         let file = OpenOptions::new()
@@ -213,16 +219,70 @@ pub fn syscall(
                             .create(true)
                             .open(path)
                             .unwrap();
-                        (file, (*fd as i32))
+                        (file.as_raw_fd(), (*fd as RawFd), Some(file))
+                    },
+                    Redirect::DupRead((fd_dest, fd_source)) => {
+                        if let Some(fd_parent) = fd_redirections.get(&(*fd_source as RawFd)) {
+                            (*fd_parent, *fd_dest as RawFd, None)
+                        } else {
+                            panic!("DupRead: Closed or not opened fd");
+                        }
+                    },
+                    Redirect::DupWrite((fd_dest, fd_source)) => {
+                        if let Some(fd_parent) = fd_redirections.get(&(*fd_source as RawFd)) {
+                            (*fd_parent, *fd_dest as RawFd, None)
+                        } else {
+                            panic!("DupWrite: Closed or not opened fd");
+                        }
+                    },
+                    Redirect::Close(fd) => {
+                        if let None = fd_redirections.remove(&(*fd as RawFd)) {
+                            panic!("Close: Trying to close not opened fd");
+                        }
+                        continue;
                     },
                     _ => continue,
                 };
-                child.fd_mappings(vec![FdMapping {
-                    parent_fd: file.as_raw_fd(),
-                    child_fd 
-                }]).expect("Could not apply file descriptor mapping.");
-                opened_files.push(file);
+
+                if let Some(entry) = fd_redirections.get_mut(&child_fd) {
+                    *entry = parent_fd;
+                } else {
+                    fd_redirections.insert(child_fd, parent_fd);
+                }
+
+                if let Some(file) = file {
+                    opened_files.push(file);
+                }
             }
+
+            let fd_mappings = fd_redirections.iter()
+                .map(|(&child_fd, &parent_fd)| {
+                    FdMapping{ parent_fd, child_fd }
+                })
+                .collect::<Vec<FdMapping>>();
+
+            let mut fds_to_close = Vec::new();
+            for fd in STDIN..=STDERR {
+                if !fd_redirections.contains_key(&(fd as RawFd)) {
+                    fds_to_close.push(fd as RawFd);
+                }
+            }
+
+            child.fd_mappings(fd_mappings).expect("Could not apply file descriptor mapping.");
+
+            /*
+            pre_exec is unsafe function, if user wants to close stdin/out/err
+            descritors we must do it between fork and execv syscalls. For
+            higher fd numbers we preprocess redirections and do not open fds
+            that would be closed
+            */
+            unsafe { child.pre_exec( move || {
+                for fd in fds_to_close.iter() {
+                    libc::close(*fd);
+                }
+                Ok(())
+            });}
+
             let mut spawned = child.spawn()
                 .unwrap();
 
@@ -788,6 +848,7 @@ impl Shell {
         background: bool,
         redirects: &mut Vec<Redirect>,
     ) -> Result<i32, Report> {
+        // TODO: parse here redirects and construct proper OutputDevice instance
         let od_result = OutputDevice::new(redirects);
         let mut output_device: OutputDevice;
         match od_result {

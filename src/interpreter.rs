@@ -336,11 +336,37 @@ fn handle_redirect_type(
         },
         #[cfg(not(target_os = "wasi"))]
         ast::Redirect::DupRead(file_descriptor, top_level_word) => {
-            None
+            let fd_dest = file_descriptor.unwrap_or(STDOUT);
+            if let Some(fd) = handle_top_level_word(shell, top_level_word) {
+                match fd.as_str() {
+                    "-" => Some(Redirect::Close(fd_dest)),
+                    fd => if let Ok(fd_source) = fd.parse::<u16>() {
+                        Some(Redirect::DupRead((fd_dest, fd_source)))
+                    } else {
+                        eprintln!("DupRead redirect top_level_word not parsed: {:?}", top_level_word);
+                        None
+                    }
+                }
+            } else {
+                None
+            }
         },
         #[cfg(not(target_os = "wasi"))]
-        ast::Redirect::DupWrite(_, _) => {
-            None
+        ast::Redirect::DupWrite(file_descriptor, top_level_word) => {
+            let fd_dest = file_descriptor.unwrap_or(STDOUT);
+            if let Some(fd) = handle_top_level_word(shell, top_level_word) {
+                match fd.as_str() {
+                    "-" => Some(Redirect::Close(fd_dest)),
+                    fd => if let Ok(fd_source) = fd.parse::<u16>() {
+                        Some(Redirect::DupWrite((fd_dest, fd_source)))
+                    } else {
+                        eprintln!("DupWrite redirect top_level_word not parsed: {:?}", top_level_word);
+                        None
+                    }
+                }
+            } else {
+                None
+            }
         },
         any => {
             eprintln!("Redirect not yet handled: {:?}", any);
