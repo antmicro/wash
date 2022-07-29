@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap,HashSet};
 use std::env;
 use std::fs;
 use std::fs::{File, OpenOptions};
@@ -101,11 +101,21 @@ pub enum Redirect {
     Write((Fd, SerializedPath)),
     Append((Fd, SerializedPath)),
     ReadWrite((Fd, SerializedPath)),
-    PipeIn(PipeReader),
-    PipeOut(PipeWriter),
-    DupRead((Fd, Fd)),
-    DupWrite((Fd, Fd)),
+    PipeIn(Option<PipeReader>),
+    PipeOut(Option<PipeWriter>),
+    Duplicate((RawFd, RawFd)),
     Close(Fd),
+}
+
+#[cfg(not(target_os = "wasi"))]
+#[derive(Debug)]
+pub enum OpenedFd {
+    File{file: File, writable: bool},
+    PipeReader(PipeReader),
+    PipeWriter(PipeWriter),
+    StdIn,
+    StdOut,
+    StdErr,
 }
 
 // communicate with the worker thread
@@ -156,117 +166,29 @@ pub fn syscall(
             }
         }
     };
+
     #[cfg(not(target_os = "wasi"))]
     let result = {
         if command == "spawn" {
-            let mut fd_redirections = HashMap::from([
-                (STDIN as RawFd, STDIN as RawFd),
-                (STDOUT as RawFd, STDOUT as RawFd),
-                (STDERR as RawFd, STDERR as RawFd),
-            ]);
-            let mut opened_files = Vec::new();
-
+            let mut std_fds = HashSet::from(
+                [STDIN as RawFd, STDOUT as RawFd, STDERR as RawFd]
+            );
             let mut child = std::process::Command::new(args[0]);
             child.args(&args[1..])
                 .envs(env);
 
-            // In bash pipeline redirections are done before rest of them
-            for redirect in redirects.iter() {
-                let (parent_fd, child_fd) = match redirect {
-                    Redirect::PipeIn(pipe) => {
-                        (pipe.as_raw_fd(), STDIN as RawFd)
-                    },
-                    Redirect::PipeOut(pipe) => {
-                        (pipe.as_raw_fd(), STDOUT as RawFd)
-                    },
-                    _ => continue,
-                };
-
-                fd_redirections.insert(child_fd, parent_fd);
-            }
-
-            for redirect in redirects.iter() {
-                let (parent_fd, child_fd, file) = match redirect {
-                    Redirect::Read((fd, path)) => {
-                        let file = OpenOptions::new()
-                            .read(true)
-                            .open(path)
-                            .unwrap();
-                        (file.as_raw_fd(), (*fd as RawFd), Some(file))
-                    },
-                    Redirect::Write((fd, path)) => {
-                        let file = OpenOptions::new()
-                            .write(true)
-                            .truncate(true)
-                            .create(true)
-                            .open(path)
-                            .unwrap();
-                        (file.as_raw_fd(), (*fd as RawFd), Some(file))
-                    },
-                    Redirect::Append((fd, path)) => {
-                        let file = OpenOptions::new()
-                            .write(true)
-                            .append(true)
-                            .create(true)
-                            .open(path)
-                            .unwrap();
-                        (file.as_raw_fd(), (*fd as RawFd), Some(file))
-                    },
-                    Redirect::ReadWrite((fd, path)) => {
-                        let file = OpenOptions::new()
-                            .read(true)
-                            .write(true)
-                            .create(true)
-                            .open(path)
-                            .unwrap();
-                        (file.as_raw_fd(), (*fd as RawFd), Some(file))
-                    },
-                    Redirect::DupRead((fd_dest, fd_source)) => {
-                        if let Some(fd_parent) = fd_redirections.get(&(*fd_source as RawFd)) {
-                            (*fd_parent, *fd_dest as RawFd, None)
-                        } else {
-                            panic!("DupRead: Closed or not opened fd");
-                        }
-                    },
-                    Redirect::DupWrite((fd_dest, fd_source)) => {
-                        if let Some(fd_parent) = fd_redirections.get(&(*fd_source as RawFd)) {
-                            (*fd_parent, *fd_dest as RawFd, None)
-                        } else {
-                            panic!("DupWrite: Closed or not opened fd");
-                        }
-                    },
-                    Redirect::Close(fd) => {
-                        if let None = fd_redirections.remove(&(*fd as RawFd)) {
-                            panic!("Close: Trying to close not opened fd");
-                        }
-                        continue;
-                    },
-                    _ => continue,
-                };
-
-                if let Some(entry) = fd_redirections.get_mut(&child_fd) {
-                    *entry = parent_fd;
-                } else {
-                    fd_redirections.insert(child_fd, parent_fd);
-                }
-
-                if let Some(file) = file {
-                    opened_files.push(file);
-                }
-            }
-
-            let fd_mappings = fd_redirections.iter()
-                .map(|(&child_fd, &parent_fd)| {
-                    FdMapping{ parent_fd, child_fd }
+            let fd_mappings = redirects.iter()
+                .map(|red| {
+                    if let Redirect::Duplicate((child_fd, parent_fd)) = *red {
+                        std_fds.remove(&child_fd);
+                        FdMapping{ parent_fd, child_fd }
+                    } else {
+                        panic!("Not allowed redirection subtype in syscall: {:?}", red);
+                    }
                 })
                 .collect::<Vec<FdMapping>>();
 
-            let mut fds_to_close = Vec::new();
-            for fd in STDIN..=STDERR {
-                if !fd_redirections.contains_key(&(fd as RawFd)) {
-                    fds_to_close.push(fd as RawFd);
-                }
-            }
+            let fds_to_close = std_fds.into_iter().collect::<Vec<RawFd>>();
 
             child.fd_mappings(fd_mappings).expect("Could not apply file descriptor mapping.");
 
@@ -274,7 +196,7 @@ pub fn syscall(
             pre_exec is unsafe function, if user wants to close stdin/out/err
             descritors we must do it between fork and execv syscalls. For
             higher fd numbers we preprocess redirections and do not open fds
-            that would be closed
+            that would be finally closed
             */
             unsafe { child.pre_exec( move || {
                 for fd in fds_to_close.iter() {
@@ -305,6 +227,7 @@ pub fn syscall(
             }
         }
     };
+
     Ok(result)
 }
 
@@ -316,6 +239,153 @@ fn path_exists(path: &str) -> io::Result<bool> {
             Err(error)
         }
     })
+}
+
+fn preprocess_redirects(redirects: &mut Vec<Redirect>) -> (
+    HashMap<RawFd, OpenedFd>, io::Result<()>
+) {
+    let mut fd_redirects = HashMap::from([
+        (STDIN as RawFd, OpenedFd::StdIn),
+        (STDOUT as RawFd, OpenedFd::StdOut),
+        (STDERR as RawFd, OpenedFd::StdErr),
+    ]);
+
+    // In bash pipeline redirections are done before rest of them
+    for redirect in redirects.iter_mut() {
+        match redirect {
+            Redirect::PipeIn(pipe) => {
+                let pipe = pipe.take()
+                    .expect("Empty pipeline redirection");
+                fd_redirects.insert(STDIN as RawFd, OpenedFd::PipeReader(pipe));
+            },
+            Redirect::PipeOut(pipe) => {
+                let pipe = pipe.take()
+                    .expect("Empty pipeline redirection");
+                fd_redirects.insert(STDOUT as RawFd, OpenedFd::PipeWriter(pipe));
+            },
+            _ => {}
+        }
+    }
+
+    for redirect in redirects.iter_mut() {
+        match redirect {
+            Redirect::Read((fd, path)) => {
+                let file = OpenOptions::new()
+                    .read(true)
+                    .open(path);
+                if let Ok(file) = file {
+                    let fd = *fd as RawFd;
+                    fd_redirects.insert(fd, OpenedFd::File{ file, writable: false });
+                } else if let Err(e) = file {
+                    return (fd_redirects, Err(e));
+                }
+            },
+            Redirect::Write((fd, path)) => {
+                let file = OpenOptions::new()
+                    .write(true)
+                    .create(true)
+                    .open(path);
+                if let Ok(file) = file {
+                    let fd = *fd as RawFd;
+                    fd_redirects.insert(fd, OpenedFd::File{ file, writable: true });
+                } else if let Err(e) = file {
+                    return (fd_redirects, Err(e));
+                }
+            },
+            Redirect::Append((fd, path)) => {
+                let file = OpenOptions::new()
+                    .write(true)
+                    .append(true)
+                    .create(true)
+                    .open(path);
+                if let Ok(file) = file {
+                    let fd = *fd as RawFd;
+                    fd_redirects.insert(fd, OpenedFd::File{ file, writable: true });
+                } else if let Err(e) = file {
+                    return (fd_redirects, Err(e));
+                }
+            },
+            Redirect::ReadWrite((fd, path)) => {
+                let file = OpenOptions::new()
+                    .read(true)
+                    .write(true)
+                    .create(true)
+                    .open(path);
+                if let Ok(file) = file {
+                    let fd = *fd as RawFd;
+                    fd_redirects.insert(fd, OpenedFd::File{ file, writable: true });
+                } else if let Err(e) = file {
+                    return (fd_redirects, Err(e));
+                }
+            },
+            Redirect::Duplicate((fd_dest, fd_source)) => {
+                if let Some(dest) = fd_redirects.get(&(*fd_source as RawFd)) {
+                    match dest {
+                        OpenedFd::File{ file, writable } => {
+                            let file = match file.try_clone() {
+                                Ok(file) => file,
+                                Err(e) => return (fd_redirects, Err(e)),
+                            };
+                            let writable = *writable;
+                            fd_redirects.insert(
+                                *fd_dest as RawFd,
+                                OpenedFd::File{file, writable}
+                            );
+                        },
+                        OpenedFd::PipeReader(pipe) => {
+                            let pipe = match pipe.try_clone() {
+                                Ok(pipe) => pipe,
+                                Err(e) => return (fd_redirects, Err(e)),
+                            };
+                            fd_redirects.insert(
+                                *fd_dest as RawFd,
+                                OpenedFd::PipeReader(pipe)
+                            );
+                        },
+                        OpenedFd::PipeWriter(pipe) => {
+                            let pipe = match pipe.try_clone() {
+                                Ok(pipe) => pipe,
+                                Err(e) => return (fd_redirects, Err(e)),
+                            };
+                            fd_redirects.insert(
+                                *fd_dest as RawFd,
+                                OpenedFd::PipeWriter(pipe)
+                            );
+                        },
+                        OpenedFd::StdIn => {
+                            fd_redirects.insert(
+                                *fd_dest as RawFd,
+                                OpenedFd::StdIn
+                            );
+                        },
+                        OpenedFd::StdOut => {
+                            fd_redirects.insert(
+                                *fd_dest as RawFd,
+                                OpenedFd::StdOut
+                            );
+                        },
+                        OpenedFd::StdErr => {
+                            fd_redirects.insert(
+                                *fd_dest as RawFd,
+                                OpenedFd::StdErr
+                            );
+                        },
+                    }
+                } else {
+                    return (
+                        fd_redirects,
+                        Err(io::Error::from_raw_os_error(libc::EBADF))
+                    );
+                }
+            },
+            Redirect::Close(fd) => {
+                fd_redirects.remove(&(*fd as RawFd));
+            },
+            Redirect::PipeIn(_) |  Redirect::PipeOut(_) => continue,
+        }
+    }
+
+    (fd_redirects, Ok(()))
 }
 
 pub struct Shell {
@@ -848,16 +918,50 @@ impl Shell {
         background: bool,
         redirects: &mut Vec<Redirect>,
     ) -> Result<i32, Report> {
-        // TODO: parse here redirects and construct proper OutputDevice instance
-        let od_result = OutputDevice::new(redirects);
+        let (fd_mapings, status) = preprocess_redirects(redirects);
+        let od_result = OutputDevice::new(&fd_mapings);
         let mut output_device: OutputDevice;
         match od_result {
             Ok(x) => output_device = x,
             Err(s) => {
+<<<<<<< HEAD:wash/src/shell_base.rs
                 eprintln!("wash: {}", s);
                 return Ok(EXIT_FAILURE)
+=======
+                eprintln!("shell: {}", s);
+                return Ok(EXIT_FAILURE);
+>>>>>>> ded7952 (Add redirects preprocessing procedure before OutputDevice creation, change scripts spawning convention):shell/src/shell_base.rs
             }
         }
+        if let Err(e) = status {
+            output_device.eprintln(&format!("shell: {}", e));
+            output_device.flush()?;
+            return Ok(EXIT_FAILURE);
+        }
+
+        let redirects = fd_mapings.iter().map( |(fd_child, target)| {
+            match target {
+                OpenedFd::File { file, writable: _ } => {
+                    Redirect::Duplicate((*fd_child, file.as_raw_fd()))
+                },
+                OpenedFd::PipeReader(pipe) => {
+                    Redirect::Duplicate((*fd_child, pipe.as_raw_fd()))
+                },
+                OpenedFd::PipeWriter(pipe) => {
+                    Redirect::Duplicate((*fd_child, pipe.as_raw_fd()))
+                },
+                OpenedFd::StdIn => {
+                    Redirect::Duplicate((*fd_child, STDIN as RawFd))
+                },
+                OpenedFd::StdOut => {
+                    Redirect::Duplicate((*fd_child, STDOUT as RawFd))
+                },
+                OpenedFd::StdErr => {
+                    Redirect::Duplicate((*fd_child, STDERR as RawFd))
+                }
+            }
+        }).collect::<Vec<Redirect>>();
+
         let result: Result<i32, Report> = match command {
             // built in commands
             "clear" => {
@@ -1248,10 +1352,13 @@ impl Shell {
                                 env::var("SHELL").unwrap()
                             };
                             args.insert(0, binary_path);
+                            #[cfg(not(target_os = "wasi"))]
+                            args.insert(1, path.into_os_string().into_string().unwrap());
                             let args_: Vec<&str> = args.iter().map(|s| &**s).collect();
                             #[cfg(target_os = "wasi")]
                             // TODO: how does this interact with stdin redirects inside the script?
                             let mut redirects = redirects.clone();
+                            #[cfg(target_os = "wasi")]
                             redirects.push(Redirect::Read((
                                 STDIN,
                                 path.into_os_string().into_string().unwrap(),
@@ -1263,7 +1370,7 @@ impl Shell {
                             // most likely WASM binary
                             args.insert(0, path.into_os_string().into_string().unwrap());
                             let args_: Vec<&str> = args.iter().map(|s| &**s).collect();
-                            Ok(syscall("spawn", &args_[..], env, background, redirects)
+                            Ok(syscall("spawn", &args_[..], env, background, &redirects)
                                 .unwrap()
                                 .exit_status)
                         }

@@ -1,12 +1,12 @@
-use std::fs;
-use std::fs::OpenOptions;
+use std::collections::HashMap;
 use std::io::Write;
+#[cfg(not(target_os = "wasi"))]
+use std::os::unix::prelude::RawFd;
 #[cfg(target_os = "wasi")]
 use std::path::Path;
-
 use color_eyre::Report;
 
-use crate::shell_base::{Redirect, STDERR, STDOUT};
+use crate::shell_base::{STDERR, STDOUT, OpenedFd};
 
 /// Wrapper for stdout/stderr operations from shell builtins so that they are redirects-aware
 
@@ -98,28 +98,33 @@ impl<'a> OutputDevice<'a> {
 
 #[cfg(not(target_os = "wasi"))]
 pub struct OutputDevice {
-    redirects: Vec<Redirect>,
+    redirects: HashMap<RawFd, OpenedFd>,
     stdout: String,
     stderr: String,
 }
 
 #[cfg(not(target_os = "wasi"))]
 impl OutputDevice {
-    pub fn new(redirects: &Vec<Redirect>) -> Result<Self, String> {
-        let redirects = redirects.iter().filter_map(|red| {
-            match red {
-                Redirect::Write((fd, path)) => {
-                    Some(Redirect::Write((*fd, path.clone())))
+    pub fn new(redirects: &HashMap<RawFd, OpenedFd>) -> Result<Self, String> {
+        let redirects = redirects.iter().filter_map(|(fd, obj)| {
+            match obj {
+                OpenedFd::StdIn | OpenedFd::PipeReader(_) => None,
+                OpenedFd::File{file, writable} => {
+                    if *writable {
+                        let file = file.try_clone().unwrap();
+                        Some((*fd, OpenedFd::File { file, writable: true }))
+                    } else {
+                        None
+                    }
                 },
-                Redirect::Append((fd, path)) => {
-                    Some(Redirect::Append((*fd, path.clone())))
+                OpenedFd::PipeWriter(pipe) => {
+                    let pipe = pipe.try_clone().unwrap();
+                    Some((*fd, OpenedFd::PipeWriter(pipe)))
                 },
-                Redirect::PipeOut(pipe) => {
-                    Some(Redirect::PipeOut(pipe.try_clone().unwrap()))
-                }
-                _ => None
+                OpenedFd::StdOut => Some((*fd, OpenedFd::StdOut)),
+                OpenedFd::StdErr => Some((*fd, OpenedFd::StdErr))
             }
-        }).collect::<Vec<Redirect>>();
+        }).collect::<HashMap<RawFd, OpenedFd>>();
         Ok(OutputDevice {
             redirects,
             stdout: String::new(),
@@ -129,10 +134,12 @@ impl OutputDevice {
 
     // TODO: ensure this gets called, maybe move it to custom Drop implementation
     pub fn flush(&mut self) -> Result<(), Report> {
-        // TODO: Due to pipe writer self object needs to be mutable
+        // TODO: Due to file/pipe writer self object needs to be mutable
         // TODO: Also we must clone stdout/stderr caused with that mutability
         if !self.stdout.is_empty() {
-            self.flush_fd(STDOUT, &self.stdout.clone())?;
+            if let Err(rep) = self.flush_fd(STDOUT, &self.stdout.clone()) {
+                self.eprintln(format!("shell: {}", rep).as_str());
+            }
         }
         if !self.stderr.is_empty() {
             self.flush_fd(STDERR, &self.stderr.clone())?;
@@ -141,42 +148,24 @@ impl OutputDevice {
     }
 
     fn flush_fd(&mut self, to_fd: u16, output: &str) -> Result<(), Report> {
-        let mut is_redirected = false;
-        for redirect in self.redirects.iter_mut() {
-            match redirect {
-                Redirect::Write((fd, file)) => {
-                    if *fd == to_fd {
-                        fs::write(file, output)?;
-                        is_redirected = true;
-                    }
-                },
-                Redirect::Append((fd, file)) => {
-                    if *fd == to_fd {
-                        let mut file = OpenOptions::new().write(true).append(true).open(file)?;
-                        write!(file, "{}", output)?;
-                        is_redirected = true;
-                    }
-                },
-                Redirect::PipeOut(pipe) => {
-                    if to_fd == STDOUT {
-                        pipe.write(format!("{}", output).as_bytes()).unwrap();
-                        is_redirected = true;
-                    }
-                },
-                _ => {
-                    // TODO: Control must not enter here, maybe panic? 
-                },
-            }
+        let out_obj = match self.redirects.get_mut(&(to_fd as RawFd)) {
+            Some(o) => o,
+            None => return Err(Report::new(
+                std::io::Error::from_raw_os_error(
+                    libc::EBADF
+                ))),
+        };
+        match out_obj {
+            OpenedFd::File{file, writable: true} => {
+                write!(file, "{}", output)?;
+            },
+            OpenedFd::PipeWriter(pipe) => {
+                write!(pipe, "{}", output)?;
+            },
+            OpenedFd::StdOut => print!("{}", output),
+            OpenedFd::StdErr => eprint!("{}", output),
+            _ => panic!("OutputDevice: received input object"),
         }
-
-        if !is_redirected {
-            if to_fd == STDOUT {
-                print!("{}", output);
-            } else {
-                eprint!("{}", output);
-            }
-        }
-
         Ok(())
     }
 

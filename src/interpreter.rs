@@ -119,7 +119,7 @@ fn handle_pipe(
             shell,
             &cmds[0],
             background,
-            &mut vec![Redirect::PipeOut(writer)],
+            &mut vec![Redirect::PipeOut(Some(writer))],
         );
 
         for cmd in cmds.iter().skip(1).take(cmds.len() - 2) {
@@ -130,8 +130,8 @@ fn handle_pipe(
                 cmd,
                 background,
                 &mut vec![
-                    Redirect::PipeIn(prev_reader),
-                    Redirect::PipeOut(writer),
+                    Redirect::PipeIn(Some(prev_reader)),
+                    Redirect::PipeOut(Some(writer)),
                 ],
             );
         }
@@ -140,7 +140,7 @@ fn handle_pipe(
             shell,
             cmds.last().unwrap(),
             background,
-            &mut vec![Redirect::PipeIn(reader)],
+            &mut vec![Redirect::PipeIn(Some(reader))],
         );
 
         exit_status
@@ -341,7 +341,7 @@ fn handle_redirect_type(
                 match fd.as_str() {
                     "-" => Some(Redirect::Close(fd_dest)),
                     fd => if let Ok(fd_source) = fd.parse::<u16>() {
-                        Some(Redirect::DupRead((fd_dest, fd_source)))
+                        Some(Redirect::Duplicate((fd_dest as i32, fd_source as i32)))
                     } else {
                         eprintln!("DupRead redirect top_level_word not parsed: {:?}", top_level_word);
                         None
@@ -358,7 +358,7 @@ fn handle_redirect_type(
                 match fd.as_str() {
                     "-" => Some(Redirect::Close(fd_dest)),
                     fd => if let Ok(fd_source) = fd.parse::<u16>() {
-                        Some(Redirect::DupWrite((fd_dest, fd_source)))
+                        Some(Redirect::Duplicate((fd_dest as i32, fd_source as i32)))
                     } else {
                         eprintln!("DupWrite redirect top_level_word not parsed: {:?}", top_level_word);
                         None
