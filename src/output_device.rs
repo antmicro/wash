@@ -1,11 +1,16 @@
+#[cfg(not(target_os = "wasi"))]
 use std::collections::HashMap;
+#[cfg(target_os = "wasi")]
+use std::fs::{OpenOptions, self};
 use std::io::Write;
 #[cfg(not(target_os = "wasi"))]
 use std::os::unix::prelude::RawFd;
 #[cfg(target_os = "wasi")]
 use std::path::Path;
 use color_eyre::Report;
-
+#[cfg(target_os = "wasi")]
+use crate::shell_base::{STDERR, STDOUT, Redirect};
+#[cfg(not(target_os = "wasi"))]
 use crate::shell_base::{STDERR, STDOUT, OpenedFd};
 
 /// Wrapper for stdout/stderr operations from shell builtins so that they are redirects-aware

@@ -2,6 +2,8 @@ use std::collections::HashMap;
 use std::env;
 #[cfg(target_os = "wasi")]
 use std::fs;
+#[cfg(not(target_os = "wasi"))]
+use std::os::unix::prelude::RawFd;
 use std::path::PathBuf;
 
 use conch_parser::ast;
@@ -271,6 +273,8 @@ fn handle_redirect_type(
                         .display()
                         .to_string()
                 }
+                #[cfg(not(target_os = "wasi"))]
+                let file_descriptor = file_descriptor as RawFd;
                 Some(Redirect::Write((file_descriptor, filename)))
             } else {
                 None
@@ -285,6 +289,8 @@ fn handle_redirect_type(
                         .display()
                         .to_string()
                 }
+                #[cfg(not(target_os = "wasi"))]
+                let file_descriptor = file_descriptor as RawFd;
                 Some(Redirect::Append((file_descriptor, filename)))
             } else {
                 None
@@ -299,6 +305,8 @@ fn handle_redirect_type(
                         .display()
                         .to_string()
                 }
+                #[cfg(not(target_os = "wasi"))]
+                let file_descriptor = file_descriptor as RawFd;
                 Some(Redirect::Read((file_descriptor, filename)))
             } else {
                 None
@@ -314,7 +322,7 @@ fn handle_redirect_type(
                         .display()
                         .to_string()
                 }
-                Some(Redirect::ReadWrite((file_descriptor, filename)))
+                Some(Redirect::ReadWrite((file_descriptor as RawFd, filename)))
             } else {
                 None
             }
@@ -329,19 +337,19 @@ fn handle_redirect_type(
                         .display()
                         .to_string()
                 }
-                Some(Redirect::Write((file_descriptor, filename)))
+                Some(Redirect::Write((file_descriptor as RawFd, filename)))
             } else {
                 None
             }
         },
         #[cfg(not(target_os = "wasi"))]
         ast::Redirect::DupRead(file_descriptor, top_level_word) => {
-            let fd_dest = file_descriptor.unwrap_or(STDOUT);
+            let fd_dest = file_descriptor.unwrap_or(STDIN);
             if let Some(fd) = handle_top_level_word(shell, top_level_word) {
                 match fd.as_str() {
-                    "-" => Some(Redirect::Close(fd_dest)),
+                    "-" => Some(Redirect::Close(fd_dest as RawFd)),
                     fd => if let Ok(fd_source) = fd.parse::<u16>() {
-                        Some(Redirect::Duplicate((fd_dest as i32, fd_source as i32)))
+                        Some(Redirect::Duplicate((fd_dest as RawFd, fd_source as RawFd)))
                     } else {
                         eprintln!("DupRead redirect top_level_word not parsed: {:?}", top_level_word);
                         None
@@ -356,9 +364,9 @@ fn handle_redirect_type(
             let fd_dest = file_descriptor.unwrap_or(STDOUT);
             if let Some(fd) = handle_top_level_word(shell, top_level_word) {
                 match fd.as_str() {
-                    "-" => Some(Redirect::Close(fd_dest)),
+                    "-" => Some(Redirect::Close(fd_dest as RawFd)),
                     fd => if let Ok(fd_source) = fd.parse::<u16>() {
-                        Some(Redirect::Duplicate((fd_dest as i32, fd_source as i32)))
+                        Some(Redirect::Duplicate((fd_dest as RawFd, fd_source as RawFd)))
                     } else {
                         eprintln!("DupWrite redirect top_level_word not parsed: {:?}", top_level_word);
                         None
@@ -368,6 +376,7 @@ fn handle_redirect_type(
                 None
             }
         },
+        // TODO: Heredoc (multiline command parsing) implementation
         any => {
             eprintln!("Redirect not yet handled: {:?}", any);
             None
