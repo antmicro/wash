@@ -606,9 +606,9 @@ impl Shell {
 
         let history_path = {
             if PathBuf::from(env::var("HOME").unwrap()).exists() {
-                format!("{}/.shell_history", env::var("HOME").unwrap())
+                format!("{}/.wash_history", env::var("HOME").unwrap())
             } else {
-                format!("{}/.shell_history", env::var("PWD").unwrap())
+                format!("{}/.wash_history", env::var("PWD").unwrap())
             }
         };
         if PathBuf::from(&history_path).exists() {
@@ -625,20 +625,20 @@ impl Shell {
         {
             Ok(file) => Some(file),
             Err(error) => {
-                eprintln!("Unable to open file for storing shell history: {}", error);
+                eprintln!("Unable to open file for storing wash history: {}", error);
                 None
             }
         };
 
-        let shellrc_path = {
+        let washrc_path = {
             if PathBuf::from(env::var("HOME").unwrap()).exists() {
-                format!("{}/.shellrc", env::var("HOME").unwrap())
+                format!("{}/.washrc", env::var("HOME").unwrap())
             } else {
-                format!("{}/.shellrc", env::var("PWD").unwrap())
+                format!("{}/.washrc", env::var("PWD").unwrap())
             }
         };
-        if PathBuf::from(&shellrc_path).exists() {
-            self.run_script(shellrc_path).unwrap();
+        if PathBuf::from(&washrc_path).exists() {
+            self.run_script(washrc_path).unwrap();
         }
 
         let motd_path = PathBuf::from("/etc/motd");
@@ -682,7 +682,7 @@ impl Shell {
             exit_status = match cmd {
                 Ok(cmd) => interpret(self, &cmd),
                 Err(e) => {
-                    eprintln!("shell: parse error: {:?}", e);
+                    eprintln!("wash: parse error: {:?}", e);
                     EXIT_FAILURE
                 }
             }
@@ -704,7 +704,7 @@ impl Shell {
         match od_result {
             Ok(x) => output_device = x,
             Err(s) => {
-                eprintln!("shell: {}", s);
+                eprintln!("wash: {}", s);
                 return Ok(EXIT_FAILURE)
             }
         }
@@ -1118,7 +1118,7 @@ impl Shell {
                         }
                     }
                     Err(reason) => {
-                        output_device.eprintln(&format!("shell: {}", &reason));
+                        output_device.eprintln(&format!("wash: {}", &reason));
                         Ok(EXIT_FAILURE)
                     }
                 }

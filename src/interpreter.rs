@@ -199,7 +199,7 @@ fn handle_simple_command(
         match shell.execute_command(&args.remove(0), &mut args, &env, background, redirects) {
             Ok(result) => result,
             Err(error) => {
-                eprintln!("shell error: {:?}", error);
+                eprintln!("wash error: {:?}", error);
                 EXIT_FAILURE
             }
         }
