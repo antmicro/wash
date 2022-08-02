@@ -8,6 +8,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "cargo:rustc-env=SHELL_COMMIT_HASH={}",
         std::str::from_utf8(&hash)?
     );
+    let date_commit = std::process::Command::new("git")
+        .args(["log", "-1", "--format=%ci"])
+        .output()
+        .expect("Failed getting commit date from git")
+        .stdout;
+    println!("cargo:rustc-env=SHELL_COMMIT_DATE={}", std::str::from_utf8(&date_commit)?);
+    let date_compile = std::process::Command::new("date")
+        .args(["+%Y-%m-%d %R:%S %z"])
+        .output()
+        .expect("Failed getting compile date")
+        .stdout;
+    println!("cargo:rustc-env=SHELL_COMPILE_DATE={}", std::str::from_utf8(&date_compile)?);
     println!("cargo:rustc-env=SHELL_TARGET={}", std::env::var("TARGET")?);
 
     Ok(())

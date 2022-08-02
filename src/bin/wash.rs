@@ -40,10 +40,13 @@ fn main() {
     };
     let matches = Command::new(name)
         .version(&*format!(
-            "{}-{} ({})\nCopyright (c) 2021 Antmicro <www.antmicro.com>",
+            "{}-{} ({})\nCopyright (c) 2021-{} Antmicro <www.antmicro.com>\nCommit date: {}\nBuild date: {}",
             env!("CARGO_PKG_VERSION"),
             env!("SHELL_COMMIT_HASH"),
-            env!("SHELL_TARGET")
+            env!("SHELL_TARGET"),
+            env!("SHELL_COMMIT_DATE").split("-").collect::<Vec<&str>>()[0],
+            env!("SHELL_COMMIT_DATE"),
+            env!("SHELL_COMPILE_DATE")
         ))
         .author("Antmicro <www.antmicro.com>")
         .arg(Arg::new("FILE").help("Execute commands from file").index(1))
