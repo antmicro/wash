@@ -926,14 +926,9 @@ impl Shell {
         let mut output_device =  match OutputDevice::new(&redirects) {
             Ok(o) => o,
             Err(s) => {
-<<<<<<< HEAD:wash/src/shell_base.rs
                 eprintln!("wash: {}", s);
                 return Ok(EXIT_FAILURE)
-=======
-                eprintln!("shell: {}", s);
-                return Ok(EXIT_FAILURE);
->>>>>>> ded7952 (Add redirects preprocessing procedure before OutputDevice creation, change scripts spawning convention):shell/src/shell_base.rs
-            }
+           }
         };
 
         #[cfg(not(target_os = "wasi"))]
