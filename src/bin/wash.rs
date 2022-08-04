@@ -34,21 +34,30 @@ fn is_fd_tty(fd: i32) -> Result<bool, Report> {
 
 fn main() {
     let name = {
-        let mut path = PathBuf::from(env::args().next().unwrap_or_else(|| "shell".to_string()));
+        let mut path = PathBuf::from(env::args().next().unwrap_or_else(|| "wash".to_string()));
         path.set_extension("");
         path.file_name().unwrap().to_str().unwrap().to_string()
     };
+    let version_short = &*format!("{}-{} ({})\nCopyright (c) 2021-{} Antmicro <www.antmicro.com>",
+        env!("CARGO_PKG_VERSION"),
+        env!("SHELL_COMMIT_HASH"),
+        env!("SHELL_TARGET"),
+        env!("SHELL_COMMIT_DATE").split("-").collect::<Vec<&str>>()[0],
+    );
     let matches = Command::new(name)
-        .version(&*format!(
-            "{}-{} ({})\nCopyright (c) 2021-{} Antmicro <www.antmicro.com>\nCommit date: {}\nBuild date: {}",
-            env!("CARGO_PKG_VERSION"),
-            env!("SHELL_COMMIT_HASH"),
-            env!("SHELL_TARGET"),
-            env!("SHELL_COMMIT_DATE").split("-").collect::<Vec<&str>>()[0],
+        .version(version_short)
+        .long_version(&*format!(
+            "{}\nCommit date: {}\nBuild date: {}",
+            version_short,
             env!("SHELL_COMMIT_DATE"),
             env!("SHELL_COMPILE_DATE")
         ))
         .author("Antmicro <www.antmicro.com>")
+        .help_template(
+            "{before-help}{bin} {version}\n\
+            {about-with-newline}\n\
+            {usage-heading}\n\t{usage}\n\
+            {all-args}{after-help}")
         .arg(Arg::new("FILE").help("Execute commands from file").index(1))
         .arg(
             Arg::new("command")
