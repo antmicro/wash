@@ -1394,7 +1394,11 @@ impl Shell {
                 match full_path {
                     Ok(path) => {
                         let file = File::open(&path).unwrap();
-                        if let Some(Ok(line)) = BufReader::new(file).lines().next() {
+                        let mut  maybe_shebang = BufReader::new(file).lines().next();
+                        if let None = maybe_shebang {
+                            maybe_shebang = Some(Ok(String::from("")));
+                        }
+                        if let Some(Ok(line)) = maybe_shebang {
                             // file starts with valid UTF-8, most likely a script
                             let binary_path = if let Some(path) = line.strip_prefix("#!") {
                                 path.trim().to_string()
@@ -1420,9 +1424,16 @@ impl Shell {
                             // most likely WASM binary
                             args.insert(0, path.into_os_string().into_string().unwrap());
                             let args_: Vec<&str> = args.iter().map(|s| &**s).collect();
-                            Ok(syscall("spawn", &args_[..], env, background, &redirects)
-                                .unwrap()
-                                .exit_status)
+                            let result = syscall("spawn", &args_[..], env, background, &redirects)
+                                .unwrap();
+
+                            // nonempty output message means that binary couldn't be executed
+                            if result.output != "" {
+                                output_device.eprintln(
+                                    &format!(
+                                    "{}: {}", env!("CARGO_PKG_NAME"), result.output))
+                            }
+                            Ok(result.exit_status)
                         }
                     }
                     Err(reason) => {
