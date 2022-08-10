@@ -34,7 +34,8 @@ fn is_fd_tty(fd: i32) -> Result<bool, Report> {
 
 fn main() {
     let name = {
-        let mut path = PathBuf::from(env::args().next().unwrap_or_else(|| "wash".to_string()));
+        let mut path = PathBuf::from(env::args().next()
+            .unwrap_or_else(|| env!("CARGO_PKG_NAME").to_string()));
         path.set_extension("");
         path.file_name().unwrap().to_str().unwrap().to_string()
     };
@@ -125,7 +126,7 @@ fn main() {
     let exit_code = match result {
         Ok(exit_code) => exit_code,
         Err(e) => {
-            eprintln!("shell: error occurred: {}", e);
+            eprintln!("{}: error occurred: {}", env!("CARGO_PKG_NAME"), e);
             2
         }
     };

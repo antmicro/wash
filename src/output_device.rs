@@ -143,7 +143,7 @@ impl OutputDevice {
         // TODO: Also we must clone stdout/stderr caused with that mutability
         if !self.stdout.is_empty() {
             if let Err(rep) = self.flush_fd(STDOUT, &self.stdout.clone()) {
-                self.eprintln(format!("shell: {}", rep).as_str());
+                self.eprintln(format!("{}: {}", env!("CARGO_PKG_NAME"), rep).as_str());
             }
         }
         if !self.stderr.is_empty() {

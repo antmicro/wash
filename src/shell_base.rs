@@ -20,7 +20,7 @@ use color_eyre::Report;
 #[cfg(not(target_os = "wasi"))]
 use command_fds::{CommandFdExt, FdMapping};
 use conch_parser::lexer::Lexer;
-use conch_parser::parse::DefaultParser;
+use conch_parser::parse::{DefaultParser, ParseError};
 use iterm2;
 use lazy_static::lazy_static;
 #[cfg(not(target_os = "wasi"))]
@@ -829,9 +829,9 @@ impl Shell {
 
         let history_path = {
             if PathBuf::from(env::var("HOME").unwrap()).exists() {
-                format!("{}/.wash_history", env::var("HOME").unwrap())
+                format!("{}/.{}_history", env::var("HOME").unwrap(), env!("CARGO_PKG_NAME"))
             } else {
-                format!("{}/.wash_history", env::var("PWD").unwrap())
+                format!("{}/.{}_history", env::var("PWD").unwrap(), env!("CARGO_PKG_NAME"))
             }
         };
         if PathBuf::from(&history_path).exists() {
@@ -848,16 +848,16 @@ impl Shell {
         {
             Ok(file) => Some(file),
             Err(error) => {
-                eprintln!("Unable to open file for storing wash history: {}", error);
+                eprintln!("Unable to open file for storing {} history: {}", env!("CARGO_PKG_NAME"), error);
                 None
             }
         };
 
         let washrc_path = {
             if PathBuf::from(env::var("HOME").unwrap()).exists() {
-                format!("{}/.washrc", env::var("HOME").unwrap())
+                format!("{}/.{}rc", env::var("HOME").unwrap(), env!("CARGO_PKG_NAME"))
             } else {
-                format!("{}/.washrc", env::var("PWD").unwrap())
+                format!("{}/.{}rc", env::var("PWD").unwrap(), env!("CARGO_PKG_NAME"))
             }
         };
         if PathBuf::from(&washrc_path).exists() {
@@ -905,7 +905,40 @@ impl Shell {
             exit_status = match cmd {
                 Ok(cmd) => interpret(self, &cmd),
                 Err(e) => {
-                    eprintln!("wash: parse error: {:?}", e);
+                    let err_msg = match e {
+                        /*
+                        TODO: Most of these errors will never occur due to
+                        unimplemented shell features so error messages are
+                        kind of general.
+                        */
+                        ParseError::BadFd(pos_start, pos_end) => {
+                            let idx_start = pos_start.byte;
+                            let idx_end = pos_end.byte;
+                            format!("{}: ambiguous redirect", input[idx_start..idx_end].to_owned())
+                        },
+                        ParseError::BadIdent(_, _) => {
+                            "bad idenftifier".to_string()
+                        },
+                        ParseError::BadSubst(_, _) => {
+                            "bad substitution".to_string()
+                        },
+                        ParseError::Unmatched(_, _) => {
+                            "unmached expression".to_string()
+                        },
+                        ParseError::IncompleteCmd(_, _, _, _) => {
+                            "incomplete command".to_string()
+                        },
+                        ParseError::Unexpected(_, _) => {
+                            "unexpected token".to_string()
+                        },
+                        ParseError::UnexpectedEOF => {
+                            "unexpected end of file".to_string()
+                        },
+                        ParseError::Custom(t) => {
+                            format!("custom AST error: {:?}", t)
+                        },
+                    };
+                    eprintln!("{}: {}", env!("CARGO_PKG_NAME"), err_msg);
                     EXIT_FAILURE
                 }
             }
@@ -926,7 +959,7 @@ impl Shell {
         let mut output_device =  match OutputDevice::new(&redirects) {
             Ok(o) => o,
             Err(s) => {
-                eprintln!("wash: {}", s);
+                eprintln!("{}: {}", env!("CARGO_PKG_NAME"), s);
                 return Ok(EXIT_FAILURE)
            }
         };
@@ -943,12 +976,12 @@ impl Shell {
             let mut output_device = match od_result {
                 Ok(o) => o,
                 Err(s) => {
-                    eprintln!("shell: {}", s);
+                    eprintln!("{}: {}", env!("CARGO_PKG_NAME"), s);
                     return Ok(EXIT_FAILURE);
                 }
             };
             if let Err(e) = status {
-                output_device.eprintln(&format!("shell: {}", e));
+                output_device.eprintln(&format!("{}: {}", env!("CARGO_PKG_NAME"), e));
                 output_device.flush()?;
                 return Ok(EXIT_FAILURE);
             }
@@ -1393,7 +1426,7 @@ impl Shell {
                         }
                     }
                     Err(reason) => {
-                        output_device.eprintln(&format!("wash: {}", &reason));
+                        output_device.eprintln(&format!("{}: {}", env!("CARGO_PKG_NAME"), &reason));
                         Ok(EXIT_FAILURE)
                     }
                 }
