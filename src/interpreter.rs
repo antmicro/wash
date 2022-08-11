@@ -262,17 +262,23 @@ fn handle_redirect_type(
     shell: &Shell,
     redirect_type: &ast::Redirect<ast::TopLevelWord<String>>,
 ) -> Option<Redirect> {
+    let get_absolute_path = |filename: String| {
+        if !filename.starts_with('/') {
+            PathBuf::from(&shell.pwd)
+                .join(&filename)
+                .display()
+                .to_string()
+        } else {
+            filename
+        }
+    };
+
     match redirect_type {
         ast::Redirect::Write(file_descriptor, top_level_word) => {
             // TODO: check noclobber option is set
             let file_descriptor = file_descriptor.unwrap_or(STDOUT);
             if let Some(mut filename) = handle_top_level_word(shell, top_level_word) {
-                if !filename.starts_with('/') {
-                    filename = PathBuf::from(&shell.pwd)
-                        .join(&filename)
-                        .display()
-                        .to_string()
-                }
+                filename = get_absolute_path(filename);
                 #[cfg(not(target_os = "wasi"))]
                 let file_descriptor = file_descriptor as RawFd;
                 Some(Redirect::Write((file_descriptor, filename)))
@@ -283,12 +289,7 @@ fn handle_redirect_type(
         ast::Redirect::Append(file_descriptor, top_level_word) => {
             let file_descriptor = file_descriptor.unwrap_or(STDOUT);
             if let Some(mut filename) = handle_top_level_word(shell, top_level_word) {
-                if !filename.starts_with('/') {
-                    filename = PathBuf::from(&shell.pwd)
-                        .join(&filename)
-                        .display()
-                        .to_string()
-                }
+                filename = get_absolute_path(filename);
                 #[cfg(not(target_os = "wasi"))]
                 let file_descriptor = file_descriptor as RawFd;
                 Some(Redirect::Append((file_descriptor, filename)))
@@ -299,12 +300,7 @@ fn handle_redirect_type(
         ast::Redirect::Read(file_descriptor, top_level_word) => {
             let file_descriptor = file_descriptor.unwrap_or(STDIN);
             if let Some(mut filename) = handle_top_level_word(shell, top_level_word) {
-                if !filename.starts_with('/') {
-                    filename = PathBuf::from(&shell.pwd)
-                        .join(&filename)
-                        .display()
-                        .to_string()
-                }
+                filename = get_absolute_path(filename);
                 #[cfg(not(target_os = "wasi"))]
                 let file_descriptor = file_descriptor as RawFd;
                 Some(Redirect::Read((file_descriptor, filename)))
@@ -316,12 +312,7 @@ fn handle_redirect_type(
         ast::Redirect::ReadWrite(file_descriptor, top_level_word) => {
             let file_descriptor = file_descriptor.unwrap_or(STDIN);
             if let Some(mut filename) = handle_top_level_word(shell, top_level_word) {
-                if !filename.starts_with('/') {
-                    filename = PathBuf::from(&shell.pwd)
-                        .join(&filename)
-                        .display()
-                        .to_string()
-                }
+                filename = get_absolute_path(filename);
                 Some(Redirect::ReadWrite((file_descriptor as RawFd, filename)))
             } else {
                 None
@@ -331,12 +322,7 @@ fn handle_redirect_type(
         ast::Redirect::Clobber(file_descriptor, top_level_word) => {
             let file_descriptor = file_descriptor.unwrap_or(STDOUT);
             if let Some(mut filename) = handle_top_level_word(shell, top_level_word) {
-                if !filename.starts_with('/') {
-                    filename = PathBuf::from(&shell.pwd)
-                        .join(&filename)
-                        .display()
-                        .to_string()
-                }
+                filename = get_absolute_path(filename);
                 Some(Redirect::Write((file_descriptor as RawFd, filename)))
             } else {
                 None
