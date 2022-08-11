@@ -1394,11 +1394,7 @@ impl Shell {
                 match full_path {
                     Ok(path) => {
                         let file = File::open(&path).unwrap();
-                        let mut  maybe_shebang = BufReader::new(file).lines().next();
-                        if let None = maybe_shebang {
-                            maybe_shebang = Some(Ok(String::from("")));
-                        }
-                        if let Some(Ok(line)) = maybe_shebang {
+                        if let Some(Ok(line)) = BufReader::new(file).lines().next() {
                             // file starts with valid UTF-8, most likely a script
                             let binary_path = if let Some(path) = line.strip_prefix("#!") {
                                 path.trim().to_string()
