@@ -409,7 +409,7 @@ pub struct Shell {
 
 impl Shell {
     pub fn new(should_echo: bool, pwd: &str) -> Self {
-        _ = syscall("hterm", &["cursor-shape", "BLOCK"], &HashMap::new(), false, &[]);
+        _ = syscall("hterm", &["set", "cursor-shape", "BLOCK"], &HashMap::new(), false, &[]);
         Shell {
             should_echo,
             pwd: PathBuf::from(pwd),
@@ -486,7 +486,7 @@ impl Shell {
         let mut escaped = false;
         let mut history_entry_to_display: i32 = -1;
         if self.insert_mode {
-            _ = syscall("hterm", &["cursor-shape", "BLOCK"], &HashMap::new(), false, &[]);
+            _ = syscall("hterm", &["set", "cursor-shape", "BLOCK"], &HashMap::new(), false, &[]);
             self.insert_mode = false;
         }
 
@@ -539,7 +539,7 @@ impl Shell {
                                     // Insert
                                     [0x32, 0x7e] => {
                                         self.insert_mode = !self.insert_mode;
-                                        _ = syscall("hterm", &["cursor-shape", if self.insert_mode { "UNDERLINE" } else { "BLOCK" }], &HashMap::new(), false, &[]);
+                                        _ = syscall("hterm", &["set", "cursor-shape", if self.insert_mode { "UNDERLINE" } else { "BLOCK" }], &HashMap::new(), false, &[]);
                                         escaped = false;
                                     }
                                     // delete key
