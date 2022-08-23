@@ -141,15 +141,18 @@ pub fn syscall(
         };
 
         let j = json!({
-            "command": command,
             "args": args,
             "env": env,
             "redirects": redirects,
             "background": background,
             "working_dir": working_dir,
-        })
-        .to_string();
-        let result = fs::read_link(format!("/!{}", j))?
+        }).to_string();
+        let c = json!({
+            "command": command,
+            "buf_len": j.len(),
+            "buf_ptr": format!("{:?}", j.as_ptr()),
+        }).to_string();
+        let result = fs::read_link(format!("/!{}", c))?
             .to_str()
             .unwrap()
             .trim_matches(char::from(0))
@@ -812,12 +815,9 @@ impl Shell {
 
         #[cfg(target_os = "wasi")] {
             // TODO: see https://github.com/WebAssembly/wasi-filesystem/issues/24
-            let cmd = json!({
-                "command": "get_cwd",
-            });
-            match fs::read_link(format!("/!{}", cmd)) {
+            match syscall("get_cwd", &[], &HashMap::new(), false, &[]) {
                 Ok(cwd) => {
-                    env::set_current_dir(cwd).unwrap_or_else(|e| {
+                    env::set_current_dir(cwd.output).unwrap_or_else(|e| {
                         eprintln!("Could not set current working dir: {}", e);
                     });
                 },

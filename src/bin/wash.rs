@@ -1,8 +1,6 @@
 #[cfg(target_os = "wasi")]
 use std::collections::HashMap;
 use std::env;
-#[cfg(target_os = "wasi")]
-use std::fs;
 use std::io;
 use std::io::Read;
 use std::os::raw::c_int;
@@ -11,8 +9,6 @@ use std::process;
 
 use clap::{Command, Arg};
 use color_eyre::Report;
-#[cfg(target_os = "wasi")]
-use serde_json::json;
 
 #[cfg(target_os = "wasi")]
 use wash::syscall;
@@ -74,13 +70,10 @@ fn main() {
     let should_echo;
 
     #[cfg(target_os = "wasi")] {
-        let cmd = json!({
-            "command": "get_cwd",
-        });
-        match fs::read_link(format!("/!{}", cmd)) {
+        match syscall("get_cwd", &[], &HashMap::new(), false, &[]) {
             Ok(cwd) => {
-                pwd = cwd.display().to_string();
-                env::set_current_dir(cwd).unwrap_or_else(|e| {
+                pwd = cwd.output;
+                env::set_current_dir(&pwd).unwrap_or_else(|e| {
                     eprintln!("Could not set current working dir: {}", e);
                 });
             },

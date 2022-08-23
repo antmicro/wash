@@ -1,13 +1,15 @@
 use std::{fs, io};
 #[cfg(target_os = "wasi")]
 use std::env;
+#[cfg(target_os = "wasi")]
+use std::collections::HashMap;
 
 use clap::{Arg, Command, ArgMatches, Values};
 use std::fs::DirEntry;
 use std::path::{Path, PathBuf};
 
 #[cfg(target_os = "wasi")]
-use serde_json::json;
+use wash::syscall;
 
 static OPT_ALL: &str = "all";
 static FILES: &str = "files";
@@ -44,12 +46,9 @@ fn main() -> io::Result<()> {
         ).get_matches();
 
     #[cfg(target_os = "wasi")] {
-        let cmd = json!({
-            "command": "get_cwd",
-        });
-        match fs::read_link(format!("/!{}", cmd)) {
+        match syscall("get_cwd", &[], &HashMap::new(), false, &[]) {
             Ok(cwd) => {
-                env::set_current_dir(cwd).unwrap_or_else(|e| {
+                env::set_current_dir(cwd.output).unwrap_or_else(|e| {
                     eprintln!("Could not set current working dir: {}", e);
                 });
             },
