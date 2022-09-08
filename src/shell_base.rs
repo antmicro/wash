@@ -1324,14 +1324,16 @@ impl Shell {
                 // close history file before deleting it
                 self.history_file = None;
                 fn traverse(path: &PathBuf, paths: &mut Vec<String>) -> io::Result<()>{
-                    for entry in fs::read_dir(path)? {
-                        let entry = entry?;
-                        let path = entry.path();
-                        let filename = String::from(path.to_str().unwrap());
-                        if entry.file_type()?.is_dir() {
-                            traverse(&entry.path(), paths)?;
+                    if let Ok(a) = fs::read_dir(path) {
+                        for entry in a {
+                            let entry = entry?;
+                            let path = entry.path();
+                            let filename = String::from(path.to_str().unwrap());
+                            if entry.file_type()?.is_dir() {
+                                traverse(&entry.path(), paths)?;
+                            }
+                            paths.push(filename);
                         }
-                        paths.push(filename);
                     }
                     Ok(())
                 }
@@ -1341,9 +1343,9 @@ impl Shell {
                 for i in files {
                     let path_obj = PathBuf::from(&i);
                     if path_obj.is_dir(){
-                        fs::remove_dir(path_obj)?;
+                        _ = fs::remove_dir(path_obj);
                     } else {
-                        fs::remove_file(path_obj)?;
+                        _ = fs::remove_file(path_obj);
                     }
                 }
                 Ok(EXIT_SUCCESS)
