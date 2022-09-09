@@ -1242,9 +1242,9 @@ impl Shell {
                             ));
                             let mut output_file = fs::File::create(&output_path).unwrap();
                             io::copy(&mut file, &mut output_file).unwrap();
-                            println!(
+                            output_device.println(&format!(
                                 "decompressing {} done.",
-                                file.enclosed_name().unwrap().display()
+                                file.enclosed_name().unwrap().display())
                             );
                         }
                         Ok(EXIT_SUCCESS)
