@@ -1339,13 +1339,21 @@ impl Shell {
                 }
 
                 let mut files: Vec<String> = vec![];
+                output_device.println("Starting purge...");
+                output_device.println("Removing /filesystem-initiated");
+                if let Err(e) = fs::remove_file("/filesystem-initiated") {
+                    output_device.eprintln(&format!("Could not remove /filesystem-initiated: {:?}", e));
+                }
                 traverse(&PathBuf::from("/"), &mut files)?;
                 for i in files {
                     let path_obj = PathBuf::from(&i);
-                    if path_obj.is_dir(){
-                        _ = fs::remove_dir(path_obj);
+                    output_device.println(&format!("Removing {}", i));
+                    if let Err(e) = if path_obj.is_dir() {
+                        fs::remove_dir(path_obj)
                     } else {
-                        _ = fs::remove_file(path_obj);
+                        fs::remove_file(path_obj)
+                    } {
+                        output_device.eprintln(&format!("Could not remove {}: {:?}", i, e));
                     }
                 }
                 Ok(EXIT_SUCCESS)
