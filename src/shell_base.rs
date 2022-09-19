@@ -395,9 +395,10 @@ fn preprocess_redirects(redirects: &mut Vec<Redirect>) -> (
     (fd_redirects, Ok(()))
 }
 
-pub struct Shell {
+pub struct Shell<'a> {
     pub pwd: PathBuf,
     pub vars: HashMap<String, String>,
+    pub args: &'a Vec<String>,
     pub last_exit_status: i32,
 
     history: Vec<String>,
@@ -407,12 +408,13 @@ pub struct Shell {
     insert_mode: bool
 }
 
-impl Shell {
-    pub fn new(should_echo: bool, pwd: &str) -> Self {
+impl<'a> Shell<'a> {
+    pub fn new(should_echo: bool, pwd: &str, args: &'a Vec<String>) -> Self {
         _ = syscall("hterm", &["set", "cursor-shape", "BLOCK"], &HashMap::new(), false, &[]);
         Shell {
             should_echo,
             pwd: PathBuf::from(pwd),
+            args,
             history: Vec::new(),
             history_file: None,
             vars: HashMap::new(),
@@ -1414,17 +1416,11 @@ impl Shell {
                                 env::var("SHELL").unwrap()
                             };
                             args.insert(0, binary_path);
-                            #[cfg(not(target_os = "wasi"))]
                             args.insert(1, path.into_os_string().into_string().unwrap());
                             let args_: Vec<&str> = args.iter().map(|s| &**s).collect();
                             #[cfg(target_os = "wasi")]
                             // TODO: how does this interact with stdin redirects inside the script?
                             let mut redirects = redirects.clone();
-                            #[cfg(target_os = "wasi")]
-                            redirects.push(Redirect::Read((
-                                STDIN,
-                                path.into_os_string().into_string().unwrap(),
-                            )));
                             Ok(syscall("spawn", &args_[..], env, background, &redirects)
                                 .unwrap()
                                 .exit_status)

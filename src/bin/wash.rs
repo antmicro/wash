@@ -55,7 +55,8 @@ fn main() {
             {about-with-newline}\n\
             {usage-heading}\n\t{usage}\n\
             {all-args}{after-help}")
-        .arg(Arg::new("FILE").help("Execute commands from file").index(1))
+        // FILE - first value is the script path, other values are CLI args
+        .arg(Arg::new("FILE").help("Execute commands from file").multiple_values(true).index(1))
         .arg(
             Arg::new("command")
                 .help("Execute provided command")
@@ -100,12 +101,15 @@ fn main() {
         env::set_var("HOME", "/");
     }
 
-    let mut shell = Shell::new(should_echo, &pwd);
+    let args = if let Some(args) = matches.values_of("FILE") {
+        args.map(|s| { String::from(s) }).collect::<Vec<String>>()
+    } else { Vec::new() };
+    let mut shell = Shell::new(should_echo, &pwd, &args);
 
     let result = if let Some(command) = matches.value_of("command") {
         shell.run_command(command)
-    } else if let Some(file) = matches.value_of("FILE") {
-        shell.run_script(file)
+    } else if args.len() != 0 {
+        shell.run_script(PathBuf::from(&args[0]))
     // is_fd_tty will fail in WASI runtimes (wasmtime/wasmer/wasiwasm), just run interpreter then
     } else if is_fd_tty(STDIN).unwrap_or(true) {
         shell.run_interpreter()
