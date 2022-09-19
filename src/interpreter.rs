@@ -427,6 +427,9 @@ fn handle_simple_word<'a>(shell: &'a Shell, word: &'a ast::DefaultSimpleWord) ->
                         .output,
                 )
             }
+            ast::Parameter::At => { Some(shell.args[1..].join(" ")) },
+            ast::Parameter::Pound => { Some(format!("{}", shell.args.len() - 1)) },
+            ast::Parameter::Positional(n) => { Some(String::from(&shell.args[*n as usize])) }
             any => Some(format!("parameter not yet handled: {:?}", any)),
         },
         any => Some(format!("simple word not yet handled: {:?}", any)),
