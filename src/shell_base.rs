@@ -1321,6 +1321,8 @@ impl Shell {
                 }
             }
             "purge" => {
+                // remove all mounting points before purging
+                _ = syscall("spawn", &["/usr/bin/umount", "-a"], env, background, &redirects);
                 // close history file before deleting it
                 self.history_file = None;
                 fn traverse(path: &PathBuf, paths: &mut Vec<String>) -> io::Result<()>{
