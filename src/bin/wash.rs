@@ -1,5 +1,6 @@
 #[cfg(target_os = "wasi")]
 use std::collections::HashMap;
+use std::collections::VecDeque;
 use std::env;
 use std::io;
 use std::io::Read;
@@ -101,15 +102,27 @@ fn main() {
         env::set_var("HOME", "/");
     }
 
-    let args = if let Some(args) = matches.values_of("FILE") {
-        args.map(|s| { String::from(s) }).collect::<Vec<String>>()
-    } else { Vec::new() };
-    let mut shell = Shell::new(should_echo, &pwd, &args);
+    let script: String;
+    let len: usize;
+    let mut shell = Shell::new(
+        should_echo,
+        &pwd,
+        if let Some(args) = matches.values_of("FILE") {
+            len = args.len();
+            let collected = args.map(|s| { String::from(s) }).collect::<VecDeque<String>>();
+            script = collected[0].clone();
+            collected
+        } else {
+            len = 0;
+            script = String::from("");
+            VecDeque::new()
+        }
+    );
 
     let result = if let Some(command) = matches.value_of("command") {
         shell.run_command(command)
-    } else if args.len() != 0 {
-        shell.run_script(PathBuf::from(&args[0]))
+    } else if len != 0 {
+        shell.run_script(PathBuf::from(script))
     // is_fd_tty will fail in WASI runtimes (wasmtime/wasmer/wasiwasm), just run interpreter then
     } else if is_fd_tty(STDIN).unwrap_or(true) {
         shell.run_interpreter()

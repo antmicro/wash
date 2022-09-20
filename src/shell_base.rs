@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 #[cfg(not(target_os = "wasi"))]
 use std::collections::HashSet;
+use std::collections::VecDeque;
 use std::env;
 use std::fs;
 use std::fs::{File, OpenOptions};
@@ -395,10 +396,10 @@ fn preprocess_redirects(redirects: &mut Vec<Redirect>) -> (
     (fd_redirects, Ok(()))
 }
 
-pub struct Shell<'a> {
+pub struct Shell {
     pub pwd: PathBuf,
     pub vars: HashMap<String, String>,
-    pub args: &'a Vec<String>,
+    pub args: VecDeque<String>,
     pub last_exit_status: i32,
 
     history: Vec<String>,
@@ -408,8 +409,8 @@ pub struct Shell<'a> {
     insert_mode: bool
 }
 
-impl<'a> Shell<'a> {
-    pub fn new(should_echo: bool, pwd: &str, args: &'a Vec<String>) -> Self {
+impl Shell {
+    pub fn new(should_echo: bool, pwd: &str, args: VecDeque<String>) -> Self {
         _ = syscall("hterm", &["set", "cursor-shape", "BLOCK"], &HashMap::new(), false, &[]);
         Shell {
             should_echo,
@@ -1361,6 +1362,30 @@ impl<'a> Shell<'a> {
                     }
                 }
                 Ok(EXIT_SUCCESS)
+            }
+            "shift" => {
+                if args.len() > 1 {
+                    output_device.eprintln("shift: too many arguments");
+                    Ok(EXIT_FAILURE)
+                } else if let Some(n) = &args.get(0) {
+                    if let Ok(m) = n.parse::<i32>() {
+                        if m < 0 {
+                            output_device.eprintln(&format!("shift: {}: shift count out of range", m));
+                            Ok(EXIT_FAILURE)
+                        } else if m as usize <= self.args.len() {
+                            _ = self.args.drain(0..m as usize);
+                            Ok(EXIT_SUCCESS)
+                        } else {
+                            Ok(EXIT_FAILURE)
+                        }
+                    } else {
+                        output_device.eprintln(&format!("shift: {}: numeric argument required", n));
+                        Ok(EXIT_FAILURE)
+                    }
+                } else {
+                    _ = self.args.pop_front();
+                    Ok(EXIT_SUCCESS)
+                }
             }
             // external commands or command not found
             _ => {
