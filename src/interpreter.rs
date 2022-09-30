@@ -192,6 +192,18 @@ fn handle_compound_command(
             }
             exit_status
         }
+        ast::CompoundCommandKind::For{ var, words, body } => {
+            let mut exit_status = EXIT_SUCCESS;
+            if let Some(w) = words {
+                for word in w {
+                    env::set_var(var, handle_top_level_word(shell, &word).unwrap());
+                    for command in body {
+                        exit_status = handle_top_level_command(shell, command);
+                    }
+                }
+            }
+            exit_status
+        },
         any => {
             eprintln!("CompoundCommandKind not yet handled: {:#?}", any);
             EXIT_FAILURE
