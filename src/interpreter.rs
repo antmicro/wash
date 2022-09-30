@@ -204,6 +204,27 @@ fn handle_compound_command(
             }
             exit_status
         },
+        ast::CompoundCommandKind::If{ conditionals, else_branch } => {
+            let mut exit_status = EXIT_SUCCESS;
+            let mut guard_exit = EXIT_FAILURE;
+            for guard_body in conditionals {
+                for command in &guard_body.guard {
+                    guard_exit = handle_top_level_command(shell, &command);
+                }
+                if guard_exit == EXIT_SUCCESS {
+                    for command in &guard_body.body {
+                        exit_status = handle_top_level_command(shell, &command);
+                    }
+                    break;
+                }
+            }
+            if guard_exit != EXIT_SUCCESS {
+                if let Some(els) = else_branch { for command in els {
+                    exit_status = handle_top_level_command(shell, command);
+                }
+            }};
+            exit_status
+        },
         any => {
             eprintln!("CompoundCommandKind not yet handled: {:#?}", any);
             EXIT_FAILURE
