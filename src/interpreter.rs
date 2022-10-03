@@ -225,6 +225,13 @@ fn handle_compound_command(
             }};
             exit_status
         },
+        ast::CompoundCommandKind::While(guard_body) => {
+            let mut exit_status = EXIT_SUCCESS;
+            while guard_body.guard.iter().fold(EXIT_SUCCESS, |_, x| { handle_top_level_command(shell, &x) }) == EXIT_SUCCESS {
+                exit_status = guard_body.body.iter().fold(EXIT_SUCCESS, |_, x| { handle_top_level_command(shell, &x) })
+            }
+            exit_status
+        }
         any => {
             eprintln!("CompoundCommandKind not yet handled: {:#?}", any);
             EXIT_FAILURE
