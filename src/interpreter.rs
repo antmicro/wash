@@ -232,6 +232,19 @@ fn handle_compound_command(
             }
             exit_status
         }
+        ast::CompoundCommandKind::Case{ word, arms } => {
+            let mut exit_status = EXIT_SUCCESS;
+            for arm in arms {
+                if arm.patterns.iter().any(|x| { handle_top_level_word(shell, &x) == handle_top_level_word(shell, word) }) {
+                    exit_status = arm.body.iter().fold(
+                        EXIT_SUCCESS,
+                        |_, x| { handle_top_level_command(shell, &x) }
+                    );
+                    break;
+                }
+            }
+            exit_status
+        }
         any => {
             eprintln!("CompoundCommandKind not yet handled: {:#?}", any);
             EXIT_FAILURE
