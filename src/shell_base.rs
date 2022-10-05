@@ -748,7 +748,7 @@ impl Shell {
         }
         // for eg. "!12", "!-2"
         lazy_static! {
-            static ref NUMBER_RE: Regex = Regex::new(r"!(-?\d+)").unwrap();
+            static ref NUMBER_RE: Regex = Regex::new(r"(?:^|[^\[])!(-?\d+)").unwrap();
         }
         // for each match
         for captures in NUMBER_RE.captures_iter(input) {
@@ -772,7 +772,7 @@ impl Shell {
 
         // $ for eg. "!ls"
         lazy_static! {
-            static ref STRING_RE: Regex = Regex::new(r"!(\w+)").unwrap();
+            static ref STRING_RE: Regex = Regex::new(r"(?:^|[^\[])!(\w+)").unwrap();
         }
         // for each match
         for captures in STRING_RE.captures_iter(&processed.clone()) {
