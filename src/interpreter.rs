@@ -230,7 +230,12 @@ fn handle_simple_command(
             }
             ast::RedirectOrCmdWord::CmdWord(cmd_word) => {
                 if let Some(arg) = handle_top_level_word(shell, &cmd_word.0) {
-                    args.push(arg);
+                    let mut globbed = glob::glob(&arg).unwrap().map(|s| s.unwrap().into_os_string().into_string().unwrap()).peekable();
+                    if let None = globbed.peek() {
+                        args.push(arg);
+                    } else {
+                        args.extend(globbed);
+                    }
                 }
             }
         }
@@ -440,6 +445,10 @@ fn handle_simple_word<'a>(shell: &'a Shell, word: &'a ast::DefaultSimpleWord) ->
             ast::Parameter::Positional(n) => { Some(String::from(if let Some(a) = &shell.args.get(*n as usize) { a } else { "" })) }
             any => Some(format!("parameter not yet handled: {:?}", any)),
         },
+        ast::SimpleWord::Star => { Some("*".to_string()) }
+        ast::SimpleWord::Question => { Some("?".to_string()) }
+        ast::SimpleWord::SquareOpen => { Some("[".to_string()) }
+        ast::SimpleWord::SquareClose => { Some("]".to_string()) }
         any => Some(format!("simple word not yet handled: {:?}", any)),
     }
 }
