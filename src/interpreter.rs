@@ -230,23 +230,25 @@ fn handle_simple_command(
             }
             ast::RedirectOrCmdWord::CmdWord(cmd_word) => {
                 if let Some(arg) = handle_top_level_word(shell, &cmd_word.0) {
-                    let mut globbed = glob::glob_with(&arg, glob::MatchOptions {
+                    if let Ok(paths) = glob::glob_with(&arg, glob::MatchOptions {
                         case_sensitive: true,
                         require_literal_leading_dot: true,
                         require_literal_separator: true,
-                    }).unwrap().map(|s| {
-                        if arg.starts_with("./") {
-                            // glob crate strips ./ prefix, if it is a bug, maybe we could fix it and submit a PR
-                            format!("./{}", s.unwrap().display())
+                    }) {
+                        let mut globbed = paths.map(|s| {
+                            if arg.starts_with("./") {
+                                // glob crate strips ./ prefix, if it is a bug, maybe we could fix it and submit a PR
+                                format!("./{}", s.unwrap().display())
+                            } else {
+                                s.unwrap().into_os_string().into_string().unwrap()
+                            }
+                        }).peekable();
+                        if let None = globbed.peek() {
+                            args.push(arg);
                         } else {
-                            s.unwrap().into_os_string().into_string().unwrap()
+                            args.extend(globbed);
                         }
-                    }).peekable();
-                    if let None = globbed.peek() {
-                        args.push(arg);
-                    } else {
-                        args.extend(globbed);
-                    }
+                    } else { args.push(arg); }
                 }
             }
         }
