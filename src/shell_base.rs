@@ -942,6 +942,7 @@ impl Shell {
                         },
                     };
                     eprintln!("{}: {}", env!("CARGO_PKG_NAME"), err_msg);
+                    self.last_exit_status = EXIT_FAILURE;
                     EXIT_FAILURE
                 }
             }
