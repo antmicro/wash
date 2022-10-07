@@ -7,6 +7,7 @@ use std::os::unix::prelude::RawFd;
 use std::path::PathBuf;
 
 use conch_parser::ast;
+use glob::Pattern;
 
 use crate::shell_base::{syscall, Redirect, Shell, EXIT_FAILURE, EXIT_SUCCESS, STDIN, STDOUT};
 
@@ -235,7 +236,11 @@ fn handle_compound_command(
         ast::CompoundCommandKind::Case{ word, arms } => {
             let mut exit_status = EXIT_SUCCESS;
             for arm in arms {
-                if arm.patterns.iter().any(|x| { handle_top_level_word(shell, &x) == handle_top_level_word(shell, word) }) {
+                if arm.patterns.iter().any(|x| {
+                    Pattern::new(&handle_top_level_word(shell, &x).unwrap())
+                        .unwrap()
+                        .matches(&handle_top_level_word(shell, word).unwrap())
+                }) {
                     exit_status = arm.body.iter().fold(
                         EXIT_SUCCESS,
                         |_, x| { handle_top_level_command(shell, &x) }
