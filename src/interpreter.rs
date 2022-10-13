@@ -235,18 +235,31 @@ fn handle_compound_command(
         }
         ast::CompoundCommandKind::Case{ word, arms } => {
             let mut exit_status = EXIT_SUCCESS;
-            for arm in arms {
-                if arm.patterns.iter().any(|x| {
-                    Pattern::new(&handle_top_level_word(shell, &x).unwrap())
-                        .unwrap()
-                        .matches(&handle_top_level_word(shell, word).unwrap())
-                }) {
-                    exit_status = arm.body.iter().fold(
-                        EXIT_SUCCESS,
-                        |_, x| { handle_top_level_command(shell, &x) }
-                    );
-                    break;
+            if let Some(handled_word) = handle_top_level_word(shell, word) {
+                for arm in arms {
+                    if arm.patterns.iter().any(|pattern| {
+                        if let Some(handled_pattern) = handle_top_level_word(shell, &pattern) {
+                            if let Ok(pat) = Pattern::new(&handled_pattern) {
+                                pat.matches(&handled_word)
+                            } else {
+                                // if the pattern contains invalid wildcard, match against literal pattern
+                                // TODO: if there are multiple valid wildcards in the pattern and at least
+                                // one invalid, the pattern will be taken as literal.
+                                // e.g. '[a*' won't match with [abbb
+                                handled_pattern == handled_word
+                            }
+                        } else { false }
+                    }) {
+                        exit_status = arm.body.iter().fold(
+                            EXIT_SUCCESS,
+                            |_, x| { handle_top_level_command(shell, &x) }
+                        );
+                        break;
+                    }
                 }
+            } else {
+                // if the word could not be matched, exit with failure
+                exit_status = EXIT_FAILURE;
             }
             exit_status
         }
