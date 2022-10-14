@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::env;
 use std::process;
 
-use wash::syscall;
+use wash::spawn;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut args = env::args().skip(1);
@@ -14,20 +14,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     };
 
-    process::exit(
-        syscall(
-            &command,
-            &args
-                // TODO: rework this abomination
-                .collect::<Vec<_>>()
-                .iter()
-                .map(move |x| x as &str)
-                .collect::<Vec<_>>(),
-            &HashMap::new(),
-            true,
-            &[],
-        )?
-        .output
-        .parse()?,
-    );
+    /*process::exit(
+        spawn(&command, &args.map().collect(), &HashMap::new(), true, &[]).output.parse()?
+    );*/
+    Ok(())
 }

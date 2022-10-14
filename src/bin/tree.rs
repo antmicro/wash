@@ -8,9 +8,6 @@ use clap::{Arg, Command, ArgMatches, Values};
 use std::fs::DirEntry;
 use std::path::{Path, PathBuf};
 
-#[cfg(target_os = "wasi")]
-use wash::syscall;
-
 static OPT_ALL: &str = "all";
 static FILES: &str = "files";
 
@@ -46,16 +43,14 @@ fn main() -> io::Result<()> {
         ).get_matches();
 
     #[cfg(target_os = "wasi")] {
-        match syscall("get_cwd", &[], &HashMap::new(), false, &[]) {
-            Ok(cwd) => {
-                env::set_current_dir(cwd.output).unwrap_or_else(|e| {
-                    eprintln!("Could not set current working dir: {}", e);
-                });
-            },
-            Err(e) => {
-                eprintln!("Could not obtain current working dir path: {}", e);
-            },
-        }
+        _ = wasi_ext_lib::chdir(
+            &match wasi_ext_lib::getcwd() {
+                Ok(p) => p,
+                Err(e) => {
+                    eprintln!("Could not obtain current working dir path: {}", e);
+                    String::from("/")
+                }
+            });
     }
 
     let dirs = matches.values_of(FILES).map_or_else(|| vec!["."], Values::collect);

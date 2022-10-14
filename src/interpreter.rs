@@ -9,7 +9,7 @@ use std::path::PathBuf;
 use conch_parser::ast;
 use glob::Pattern;
 
-use crate::shell_base::{syscall, Redirect, Shell, EXIT_FAILURE, EXIT_SUCCESS, STDIN, STDOUT};
+use crate::shell_base::{Redirect, Shell, EXIT_FAILURE, EXIT_SUCCESS, STDIN, STDOUT};
 
 pub fn interpret(shell: &mut Shell, cmd: &ast::TopLevelCommand<String>) -> i32 {
     handle_top_level_command(shell, cmd)
@@ -338,7 +338,8 @@ fn handle_simple_command(
             // if it's a global update env, if shell variable update only vars
             if env::var(key).is_ok() {
                 env::set_var(&key, &value);
-                let _ = syscall("set_env", &[key, value], &env, false, redirects);
+                #[cfg(target_os = "wasi")]
+                let _ = wasi_ext_lib::set_env(key, Some(value));
             } else {
                 shell.vars.insert(key.clone(), value.clone());
             }
@@ -511,9 +512,7 @@ fn handle_simple_word<'a>(shell: &'a Shell, word: &'a ast::DefaultSimpleWord) ->
                 }
                 #[cfg(target_os = "wasi")]
                 Some(
-                    syscall("getpid", &[], &HashMap::new(), false, &[])
-                        .unwrap()
-                        .output,
+                    wasi_ext_lib::getpid().unwrap().to_string()
                 )
             }
             ast::Parameter::At => {

@@ -11,8 +11,6 @@ use std::process;
 use clap::{Command, Arg};
 use color_eyre::Report;
 
-#[cfg(target_os = "wasi")]
-use wash::syscall;
 use wash::Shell;
 
 #[cfg(not(target_os = "wasi"))]
@@ -26,7 +24,7 @@ fn is_fd_tty(fd: i32) -> Result<bool, Report> {
     #[cfg(not(target_os = "wasi"))]
     return Ok(unsafe { isatty(fd) } == 1);
     #[cfg(target_os = "wasi")]
-    return Ok(syscall("isatty", &[&fd.to_string()], &HashMap::new(), false, &[])?.output == "1");
+    return Ok(wasi_ext_lib::isatty(fd as u32).unwrap());
 }
 
 fn main() {
@@ -72,17 +70,17 @@ fn main() {
     let should_echo;
 
     #[cfg(target_os = "wasi")] {
-        match syscall("get_cwd", &[], &HashMap::new(), false, &[]) {
-            Ok(cwd) => {
-                pwd = cwd.output;
-                env::set_current_dir(&pwd).unwrap_or_else(|e| {
-                    eprintln!("Could not set current working dir: {}", e);
-                });
-            },
-            Err(e) => {
-                pwd = String::from("/");
-                eprintln!("Could not obtain current working dir path: {}", e);
-            },
+        if let Ok(_) = wasi_ext_lib::chdir(
+            &match wasi_ext_lib::getcwd() {
+                Ok(p) => { pwd = p; &pwd },
+                Err(e) => {
+                    eprintln!("Could not obtain current working dir path: {}", e);
+                    pwd = String::from("/");
+                    &pwd
+                }
+            }) {
+        } else {
+            println!("Faile");
         }
         should_echo = true;
     }

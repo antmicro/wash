@@ -16,6 +16,8 @@ use std::path::PathBuf;
 use std::process::exit;
 use std::thread;
 use std::time::Duration;
+#[cfg(target_os = "wasi")]
+use std::convert::From;
 
 use color_eyre::Report;
 #[cfg(not(target_os = "wasi"))]
@@ -33,8 +35,6 @@ use regex::Regex;
 use serde::{Serialize, Serializer};
 #[cfg(target_os = "wasi")]
 use serde::ser::SerializeStruct;
-#[cfg(target_os = "wasi")]
-use serde_json::json;
 
 use crate::interpreter::interpret;
 use crate::output_device::OutputDevice;
@@ -70,6 +70,15 @@ pub enum Redirect {
     Read((Fd, SerializedPath)),
     Write((Fd, SerializedPath)),
     Append((Fd, SerializedPath)),
+}
+
+#[cfg(target_os = "wasi")]
+fn as_internal_redirect(r: &Redirect) -> wasi_ext_lib::Redirect {
+    match r {
+        Redirect::Read((fd, path)) => wasi_ext_lib::Redirect::Read((*fd as u32, path.to_string())),
+        Redirect::Write((fd, path)) => wasi_ext_lib::Redirect::Write((*fd as u32, path.to_string())),
+        Redirect::Append((fd, path)) => wasi_ext_lib::Redirect::Append((*fd as u32, path.to_string()))
+    }
 }
 
 #[cfg(target_os = "wasi")]
@@ -121,49 +130,73 @@ pub enum OpenedFd {
     StdErr,
 }
 
-// communicate with the worker thread
-pub fn syscall(
-    command: &str,
+pub fn spawn(
+    path: &str,
     args: &[&str],
     env: &HashMap<String, String>,
     background: bool,
-    redirects: &[Redirect],
+    redirects: &[Redirect]
 ) -> Result<SyscallResult, Report> {
-    #[cfg(target_os = "wasi")]
-    let result = {
-        let working_dir = match std::env::current_dir() {
-            Ok(path) => {
-                path.display().to_string()
-            },
-            Err(e) => {
-                eprintln!("Parsing current directory path error: {}", e);
-                String::from("/")
-            },
+    #[cfg(target_os = "wasi")] {
+        let cast_redirects = {
+            let mut cast_redirects = Vec::<wasi_ext_lib::Redirect>::new();
+            for i in redirects {
+                cast_redirects.push(as_internal_redirect(i));
+            }
+            cast_redirects
         };
+        Ok({let a = wasi_ext_lib::spawn(path, args, env, background, &cast_redirects);
+            SyscallResult {
+                exit_status: a.exit_status,
+                output: a.output
+            }}
+        )
+    }
+    #[cfg(not(target_os = "wasi"))]
+    return Ok({
+        let mut std_fds = HashSet::from(
+            [STDIN as RawFd, STDOUT as RawFd, STDERR as RawFd]
+        );
+        let mut child = std::process::Command::new(path);
+        child.args(args)
+            .envs(env);
 
-        let j = json!({
-            "args": args,
-            "env": env,
-            "redirects": redirects,
-            "background": background,
-            "working_dir": working_dir,
-        }).to_string();
-        let c = json!({
-            "command": command,
-            "buf_len": j.len(),
-            "buf_ptr": format!("{:?}", j.as_ptr()),
-        }).to_string();
-        let result = fs::read_link(format!("/!{}", c))?
-            .to_str()
-            .unwrap()
-            .trim_matches(char::from(0))
-            .to_string();
+        let fd_mappings = redirects.iter()
+            .map(|red| {
+                if let Redirect::Duplicate((child_fd, parent_fd)) = *red {
+                    std_fds.remove(&child_fd);
+                    FdMapping{ parent_fd, child_fd }
+                } else {
+                    panic!("Not allowed redirection subtype in syscall: {:?}", red);
+                }
+            })
+            .collect::<Vec<FdMapping>>();
+
+        let fds_to_close = std_fds.into_iter().collect::<Vec<RawFd>>();
+
+        child.fd_mappings(fd_mappings).expect("Could not apply file descriptor mapping.");
+
+        /*
+        pre_exec is unsafe function, if user wants to close stdin/out/err
+        descritors we must do it between fork and execv syscalls. For
+        higher fd numbers we preprocess redirections and do not open fds
+        that would be finally closed
+        */
+        unsafe { child.pre_exec( move || {
+            for fd in fds_to_close.iter() {
+                libc::close(*fd);
+            }
+            Ok(())
+        });}
+
+        let mut spawned = child.spawn()
+            .unwrap();
+
         if !background {
-            let (exit_status, output) = result.split_once("\x1b").unwrap();
-            let exit_status = exit_status.parse::<i32>().unwrap();
+            let exit_status = spawned.wait().unwrap().code().unwrap();
             SyscallResult {
                 exit_status,
-                output: output.to_string(),
+                output: "".to_string(),
             }
         } else {
             SyscallResult {
@@ -171,70 +204,8 @@ pub fn syscall(
                 output: "".to_string(),
             }
         }
-    };
 
-    #[cfg(not(target_os = "wasi"))]
-    let result = {
-        if command == "spawn" {
-            let mut std_fds = HashSet::from(
-                [STDIN as RawFd, STDOUT as RawFd, STDERR as RawFd]
-            );
-            let mut child = std::process::Command::new(args[0]);
-            child.args(&args[1..])
-                .envs(env);
-
-            let fd_mappings = redirects.iter()
-                .map(|red| {
-                    if let Redirect::Duplicate((child_fd, parent_fd)) = *red {
-                        std_fds.remove(&child_fd);
-                        FdMapping{ parent_fd, child_fd }
-                    } else {
-                        panic!("Not allowed redirection subtype in syscall: {:?}", red);
-                    }
-                })
-                .collect::<Vec<FdMapping>>();
-
-            let fds_to_close = std_fds.into_iter().collect::<Vec<RawFd>>();
-
-            child.fd_mappings(fd_mappings).expect("Could not apply file descriptor mapping.");
-
-            /*
-            pre_exec is unsafe function, if user wants to close stdin/out/err
-            descritors we must do it between fork and execv syscalls. For
-            higher fd numbers we preprocess redirections and do not open fds
-            that would be finally closed
-            */
-            unsafe { child.pre_exec( move || {
-                for fd in fds_to_close.iter() {
-                    libc::close(*fd);
-                }
-                Ok(())
-            });}
-
-            let mut spawned = child.spawn()
-                .unwrap();
-
-            if !background {
-                let exit_status = spawned.wait().unwrap().code().unwrap();
-                SyscallResult {
-                    exit_status,
-                    output: "".to_string(),
-                }
-            } else {
-                SyscallResult {
-                    exit_status: EXIT_SUCCESS,
-                    output: "".to_string(),
-                }
-            }
-        } else {
-            SyscallResult {
-                exit_status: EXIT_SUCCESS,
-                output: "".to_string(),
-            }
-        }
-    };
-
-    Ok(result)
+    });
 }
 
 fn path_exists(path: &str) -> io::Result<bool> {
@@ -411,7 +382,6 @@ pub struct Shell {
 
 impl Shell {
     pub fn new(should_echo: bool, pwd: &str, args: VecDeque<String>) -> Self {
-        _ = syscall("hterm", &["set", "cursor-shape", "BLOCK"], &HashMap::new(), false, &[]);
         Shell {
             should_echo,
             pwd: PathBuf::from(pwd),
@@ -489,7 +459,8 @@ impl Shell {
         let mut escaped = false;
         let mut history_entry_to_display: i32 = -1;
         if self.insert_mode {
-            _ = syscall("hterm", &["set", "cursor-shape", "BLOCK"], &HashMap::new(), false, &[]);
+            #[cfg(target_os = "wasi")]
+            let _ = wasi_ext_lib::hterm("cursor-shape", Some("BLOCK"));
             self.insert_mode = false;
         }
 
@@ -542,7 +513,8 @@ impl Shell {
                                     // Insert
                                     [0x32, 0x7e] => {
                                         self.insert_mode = !self.insert_mode;
-                                        _ = syscall("hterm", &["set", "cursor-shape", if self.insert_mode { "UNDERLINE" } else { "BLOCK" }], &HashMap::new(), false, &[]);
+                                        #[cfg(target_os = "wasi")]
+                                        let _ = wasi_ext_lib::hterm("cursor-shape", Some("UNDERLINE"));
                                         escaped = false;
                                     }
                                     // delete key
@@ -810,24 +782,21 @@ impl Shell {
     }
 
     pub fn run_interpreter(&mut self) -> Result<i32, Report> {
-        if self.should_echo {
+        if cfg!(target_os = "wasi") && self.should_echo {
             // disable echoing on hterm side (ignore Error that will arise on wasi runtimes other
             // than ours browser implementation (i. e. wasmer/wasmtime)
-            let _ = syscall("set_echo", &["0"], &HashMap::new(), false, &[]);
+            #[cfg(target_os = "wasi")]
+            let _ = wasi_ext_lib::set_echo(true);
         }
 
         #[cfg(target_os = "wasi")] {
             // TODO: see https://github.com/WebAssembly/wasi-filesystem/issues/24
-            match syscall("get_cwd", &[], &HashMap::new(), false, &[]) {
-                Ok(cwd) => {
-                    env::set_current_dir(cwd.output).unwrap_or_else(|e| {
-                        eprintln!("Could not set current working dir: {}", e);
-                    });
-                },
-                Err(e) => {
-                    eprintln!("Could not obtain current working dir path: {}", e);
-                },
-            }
+            _ = wasi_ext_lib::chdir(
+                &if let Ok(p) = wasi_ext_lib::getcwd() {
+                    p
+                } else {
+                    String::from("/")
+                });
         }
 
         let history_path = {
@@ -1064,19 +1033,10 @@ impl Shell {
                         env::set_var("OLDPWD", env::current_dir().unwrap().to_str().unwrap());
                         #[cfg(target_os = "wasi")]
                         {
-                            syscall(
-                                "set_env",
-                                &["OLDPWD", env::current_dir().unwrap().to_str().unwrap()],
-                                env,
-                                background,
-                                &[],
-                            )
-                            .unwrap();
-                            let pwd =
-                                syscall("chdir", &[path.to_str().unwrap()], env, background, &[])
-                                    .unwrap()
-                                    .output;
-                            syscall("set_env", &["PWD", &pwd], env, background, &[]).unwrap();
+                            wasi_ext_lib::set_env("OLDPWD", Some(env::current_dir().unwrap().to_str().unwrap())).unwrap();
+                            let pwd = fs::canonicalize(&path).unwrap();
+                            wasi_ext_lib::chdir(&path.to_str().unwrap()).unwrap();
+                            wasi_ext_lib::set_env("PWD", Some(&pwd.to_str().unwrap())).unwrap();
                             self.pwd = PathBuf::from(&pwd);
                         }
                         #[cfg(not(target_os = "wasi"))]
@@ -1107,7 +1067,8 @@ impl Shell {
                             self.vars.remove(arg);
                             if env::var(&arg).is_ok() {
                                 env::remove_var(&arg);
-                                syscall("set_env", &[arg], env, background, &[]).unwrap();
+                                #[cfg(target_os = "wasi")]
+                                wasi_ext_lib::set_env(arg, None).unwrap();
                             }
                         }
                     }
@@ -1129,14 +1090,18 @@ impl Shell {
                     for arg in args.iter().skip(1) {
                         if args[0] == "-x" {
                             if let Some((key, value)) = arg.split_once("=") {
-                                syscall("set_env", &[key, value], env, background, &[]).unwrap();
+                                #[cfg(target_os = "wasi")]
+                                wasi_ext_lib::set_env(key, Some(value)).unwrap();
+                                std::env::set_var(key, value);
                             }
                         } else if let Some((key, value)) = arg.split_once("=") {
-                            syscall("set_env", &[key], env, background, &[]).unwrap();
+                            #[cfg(target_os = "wasi")]
+                            wasi_ext_lib::set_env(key, None).unwrap();
                             self.vars.insert(key.to_string(), value.to_string());
                         } else {
                             let value = env::var(arg).unwrap();
-                            syscall("set_env", &[arg], env, background, &[]).unwrap();
+                            #[cfg(target_os = "wasi")]
+                            wasi_ext_lib::set_env(arg, None).unwrap();
                             self.vars.insert(arg.clone(), value.clone());
                         }
                     }
@@ -1162,13 +1127,16 @@ impl Shell {
                         if let Some((key, value)) = arg.split_once("=") {
                             self.vars.remove(key);
                             env::set_var(&key, &value);
-                            syscall("set_env", &[key, value], env, background, &[]).unwrap();
+                            #[cfg(target_os = "wasi")]
+                            wasi_ext_lib::set_env(key, Some(value)).unwrap();
                         } else if let Some(value) = self.vars.remove(arg) {
                             env::set_var(&arg, &value);
-                            syscall("set_env", &[arg, &value], env, background, &[]).unwrap();
+                            #[cfg(target_os = "wasi")]
+                            wasi_ext_lib::set_env(arg, Some(&value)).unwrap();
                         } else {
                             env::set_var(&arg, "");
-                            syscall("set_env", &[arg, ""], env, background, &[]).unwrap();
+                            #[cfg(target_os = "wasi")]
+                            wasi_ext_lib::set_env(arg, Some("")).unwrap();
                         }
                     }
                     Ok(EXIT_SUCCESS)
@@ -1326,7 +1294,7 @@ impl Shell {
             }
             "purge" => {
                 // remove all mounting points before purging
-                _ = syscall("spawn", &["/usr/bin/umount", "-a"], env, background, &redirects);
+                spawn("/usr/bin/umount", &["-a"], env, background, &redirects).unwrap();
                 // close history file before deleting it
                 self.history_file = None;
                 fn traverse(path: &PathBuf, paths: &mut Vec<String>) -> io::Result<()>{
@@ -1447,15 +1415,12 @@ impl Shell {
                             #[cfg(target_os = "wasi")]
                             // TODO: how does this interact with stdin redirects inside the script?
                             let mut redirects = redirects.clone();
-                            Ok(syscall("spawn", &args_[..], env, background, &redirects)
-                                .unwrap()
-                                .exit_status)
+                            Ok(spawn(&args_[0], &args_[1..], env, background, &*redirects).unwrap().exit_status)
                         } else {
                             // most likely WASM binary
                             args.insert(0, path.into_os_string().into_string().unwrap());
                             let args_: Vec<&str> = args.iter().map(|s| &**s).collect();
-                            let result = syscall("spawn", &args_[..], env, background, &redirects)
-                                .unwrap();
+                            let result = spawn(&args_[0], &args_[1..], env, background, &redirects).unwrap();
 
                             // nonempty output message means that binary couldn't be executed
                             if result.output != "" {
