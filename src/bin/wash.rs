@@ -9,7 +9,6 @@ use std::path::PathBuf;
 use std::process;
 
 use clap::{Command, Arg};
-use color_eyre::Report;
 
 use wash::Shell;
 
@@ -20,11 +19,11 @@ extern "C" {
 
 const STDIN: c_int = 0;
 
-fn is_fd_tty(fd: i32) -> Result<bool, Report> {
+fn is_fd_tty(fd: i32) -> Result<bool, i32> {
     #[cfg(not(target_os = "wasi"))]
     return Ok(unsafe { isatty(fd) } == 1);
     #[cfg(target_os = "wasi")]
-    return Ok(wasi_ext_lib::isatty(fd as u32).unwrap());
+    return wasi_ext_lib::isatty(fd as u32);
 }
 
 fn main() {
@@ -70,18 +69,15 @@ fn main() {
     let should_echo;
 
     #[cfg(target_os = "wasi")] {
-        if let Ok(_) = wasi_ext_lib::chdir(
+        let _ = wasi_ext_lib::chdir(
             &match wasi_ext_lib::getcwd() {
                 Ok(p) => { pwd = p; &pwd },
                 Err(e) => {
-                    eprintln!("Could not obtain current working dir path: {}", e);
+                    eprintln!("Could not obtain current working dir path (error {})", e);
                     pwd = String::from("/");
                     &pwd
                 }
-            }) {
-        } else {
-            println!("Faile");
-        }
+            });
         should_echo = true;
     }
     #[cfg(not(target_os = "wasi"))] {
