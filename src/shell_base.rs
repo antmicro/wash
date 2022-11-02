@@ -59,11 +59,6 @@ enum HistoryExpansion {
     Unchanged,
 }
 
-pub struct SyscallResult {
-    pub exit_status: i32,
-    pub output: String,
-}
-
 #[cfg(target_os = "wasi")]
 #[derive(Debug, Clone)]
 pub enum Redirect {
@@ -136,7 +131,7 @@ pub fn spawn(
     env: &HashMap<String, String>,
     background: bool,
     redirects: &[Redirect]
-) -> Result<SyscallResult, Report> {
+) -> Result<i32, i32> {
     #[cfg(target_os = "wasi")] {
         let cast_redirects = {
             let mut cast_redirects = Vec::<wasi_ext_lib::Redirect>::new();
@@ -145,12 +140,7 @@ pub fn spawn(
             }
             cast_redirects
         };
-        Ok({let a = wasi_ext_lib::spawn(path, args, env, background, &cast_redirects);
-            SyscallResult {
-                exit_status: a.exit_status,
-                output: a.output
-            }}
-        )
+        wasi_ext_lib::spawn(path, args, env, background, &cast_redirects)
     }
     #[cfg(not(target_os = "wasi"))]
     return Ok({
@@ -194,15 +184,9 @@ pub fn spawn(
 
         if !background {
             let exit_status = spawned.wait().unwrap().code().unwrap();
-            SyscallResult {
-                exit_status,
-                output: "".to_string(),
-            }
+            Ok(exit_status)
         } else {
-            SyscallResult {
-                exit_status: EXIT_SUCCESS,
-                output: "".to_string(),
-            }
+            Ok(EXIT_SUCCESS)
         }
 
     });
@@ -1415,20 +1399,22 @@ impl Shell {
                             #[cfg(target_os = "wasi")]
                             // TODO: how does this interact with stdin redirects inside the script?
                             let mut redirects = redirects.clone();
-                            Ok(spawn(&args_[0], &args_[1..], env, background, &*redirects).unwrap().exit_status)
+                            // TODO: we should not unwrap here
+                            Ok(spawn(&args_[0], &args_[1..], env, background, &*redirects).unwrap())
                         } else {
                             // most likely WASM binary
                             args.insert(0, path.into_os_string().into_string().unwrap());
                             let args_: Vec<&str> = args.iter().map(|s| &**s).collect();
-                            let result = spawn(&args_[0], &args_[1..], env, background, &redirects).unwrap();
-
-                            // nonempty output message means that binary couldn't be executed
-                            if result.output != "" {
-                                output_device.eprintln(
-                                    &format!(
-                                    "{}: {}", env!("CARGO_PKG_NAME"), result.output))
+                            match spawn(&args_[0], &args_[1..], env, background, &redirects) {
+                                // nonempty output message means that binary couldn't be executed
+                                Err(e) => {
+                                    output_device.eprintln(
+                                        &format!(
+                                        "{}: could not spawn process (error {})", env!("CARGO_PKG_NAME"), e));
+                                    Ok(EXIT_FAILURE)
+                                }
+                                Ok(e) => Ok(e)
                             }
-                            Ok(result.exit_status)
                         }
                     }
                     Err(reason) => {

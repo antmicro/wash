@@ -23,7 +23,7 @@ fn is_fd_tty(fd: i32) -> Result<bool, i32> {
     #[cfg(not(target_os = "wasi"))]
     return Ok(unsafe { isatty(fd) } == 1);
     #[cfg(target_os = "wasi")]
-    return wasi_ext_lib::isatty(fd as u32);
+    return wasi_ext_lib::isatty(fd);
 }
 
 fn main() {
