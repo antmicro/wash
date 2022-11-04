@@ -184,9 +184,9 @@ pub fn spawn(
 
         if !background {
             let exit_status = spawned.wait().unwrap().code().unwrap();
-            Ok(exit_status)
+            exit_status
         } else {
-            Ok(EXIT_SUCCESS)
+            EXIT_SUCCESS
         }
 
     });
