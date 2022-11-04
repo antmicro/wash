@@ -1410,7 +1410,7 @@ impl Shell {
                                 Err(e) => {
                                     output_device.eprintln(
                                         &format!(
-                                        "{}: could not spawn process (error {})", env!("CARGO_PKG_NAME"), e));
+                                        "{}: could not execute binary (os error {})", env!("CARGO_PKG_NAME"), e));
                                     Ok(EXIT_FAILURE)
                                 }
                                 Ok(e) => Ok(e)
