@@ -1110,14 +1110,17 @@ impl Shell {
                     for arg in args {
                         if let Some((key, value)) = arg.split_once("=") {
                             self.vars.remove(key);
+                            #[cfg(not(target_os = "wasi"))]
                             env::set_var(&key, &value);
                             #[cfg(target_os = "wasi")]
                             wasi_ext_lib::set_env(&key, Some(&value)).unwrap();
                         } else if let Some(value) = self.vars.remove(arg) {
+                            #[cfg(not(target_os = "wasi"))]
                             env::set_var(&arg, &value);
                             #[cfg(target_os = "wasi")]
                             wasi_ext_lib::set_env(&arg, Some(&value)).unwrap();
                         } else {
+                            #[cfg(not(target_os = "wasi"))]
                             env::set_var(&arg, "");
                             #[cfg(target_os = "wasi")]
                             wasi_ext_lib::set_env(&arg, Some("")).unwrap();
