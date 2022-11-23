@@ -16,8 +16,6 @@ use std::path::PathBuf;
 use std::process::exit;
 use std::thread;
 use std::time::Duration;
-#[cfg(target_os = "wasi")]
-use std::convert::From;
 
 use color_eyre::Report;
 #[cfg(not(target_os = "wasi"))]
@@ -31,10 +29,7 @@ use libc;
 #[cfg(not(target_os = "wasi"))]
 use os_pipe::{PipeReader, PipeWriter};
 use regex::Regex;
-#[cfg(target_os = "wasi")]
-use serde::{Serialize, Serializer};
-#[cfg(target_os = "wasi")]
-use serde::ser::SerializeStruct;
+
 
 use crate::interpreter::interpret;
 use crate::output_device::OutputDevice;
@@ -68,36 +63,11 @@ pub enum Redirect {
 }
 
 #[cfg(target_os = "wasi")]
-fn as_internal_redirect(r: &Redirect) -> wasi_ext_lib::Redirect {
+fn as_ext_redirect(r: &Redirect) -> wasi_ext_lib::Redirect {
     match r {
-        Redirect::Read((fd, path)) => wasi_ext_lib::Redirect::Read((*fd as u32, path.to_string())),
-        Redirect::Write((fd, path)) => wasi_ext_lib::Redirect::Write((*fd as u32, path.to_string())),
-        Redirect::Append((fd, path)) => wasi_ext_lib::Redirect::Append((*fd as u32, path.to_string()))
-    }
-}
-
-#[cfg(target_os = "wasi")]
-impl Serialize for Redirect {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error> where S: Serializer {
-        let mut state = serializer.serialize_struct("Redirect", 3)?;
-        match self {
-            Redirect::Read((fd, path)) => {
-                state.serialize_field("mode", "read")?;
-                state.serialize_field("fd", fd)?;
-                state.serialize_field("path", path)?;
-            }
-            Redirect::Write((fd, path)) => {
-                state.serialize_field("mode", "write")?;
-                state.serialize_field("fd", fd)?;
-                state.serialize_field("path", path)?;
-            }
-            Redirect::Append((fd, path)) => {
-                state.serialize_field("mode", "append")?;
-                state.serialize_field("fd", fd)?;
-                state.serialize_field("path", path)?;
-            }
-        }
-        state.end()
+        Redirect::Read((fd, path)) => wasi_ext_lib::Redirect::Read((*fd as u32, path)),
+        Redirect::Write((fd, path)) => wasi_ext_lib::Redirect::Write((*fd as u32, path)),
+        Redirect::Append((fd, path)) => wasi_ext_lib::Redirect::Append((*fd as u32, path))
     }
 }
 
@@ -133,14 +103,9 @@ pub fn spawn(
     redirects: &[Redirect]
 ) -> Result<i32, i32> {
     #[cfg(target_os = "wasi")] {
-        let cast_redirects = {
-            let mut cast_redirects = Vec::<wasi_ext_lib::Redirect>::new();
-            for i in redirects {
-                cast_redirects.push(as_internal_redirect(i));
-            }
-            cast_redirects
-        };
-        wasi_ext_lib::spawn(path, args, env, background, &cast_redirects)
+        wasi_ext_lib::spawn(
+            path, args, env, background,
+            redirects.iter().map(|r| as_ext_redirect(r)).collect())
     }
     #[cfg(not(target_os = "wasi"))]
     return Ok({
