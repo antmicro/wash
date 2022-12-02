@@ -1138,49 +1138,6 @@ impl Shell {
                     Ok(EXIT_SUCCESS)
                 }
             }
-            "unzip" => {
-                if let Some(filepath) = &args.get(0) {
-                    if !PathBuf::from(filepath).is_file(){
-                        output_device.eprintln(&format!("unzip: cannot find or open {0}, {0}.zip or {0}.ZIP", filepath));
-                        Ok(EXIT_FAILURE)
-                    } else if let Ok(archive) = &mut zip::ZipArchive::new(fs::File::open(&PathBuf::from(filepath)).unwrap()) {
-                        for i in 0..archive.len() {
-                            let mut file = archive.by_index(i).unwrap();
-                            let output_path = file.enclosed_name().to_owned().unwrap();
-                            if file.name().ends_with('/') {
-                                output_device
-                                    .println(&format!("creating dir {}", output_path.display()));
-                                fs::create_dir_all(&output_path).unwrap();
-                                continue;
-                            }
-                            if let Some(parent) = output_path.parent() {
-                                if !parent.exists() {
-                                    output_device
-                                        .println(&format!("creating dir {}", parent.display()));
-                                    fs::create_dir_all(&parent).unwrap();
-                                }
-                            }
-                            output_device.println(&format!(
-                                "decompressing {}",
-                                file.enclosed_name().unwrap().display()
-                            ));
-                            let mut output_file = fs::File::create(&output_path).unwrap();
-                            io::copy(&mut file, &mut output_file).unwrap();
-                            output_device.println(&format!(
-                                "decompressing {} done.",
-                                file.enclosed_name().unwrap().display())
-                            );
-                        }
-                        Ok(EXIT_SUCCESS)
-                    } else {
-                        output_device.eprintln(&format!("unzip: cannot read archive"));
-                        Ok(EXIT_FAILURE)
-                    }
-                } else {
-                    output_device.eprintln("unzip: missing operand");
-                    Ok(EXIT_FAILURE)
-                }
-            }
             "sleep" => {
                 // TODO: requires poll_oneoff implementation
                 if let Some(sec_str) = &args.get(0) {
