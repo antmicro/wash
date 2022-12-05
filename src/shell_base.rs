@@ -14,8 +14,6 @@ use std::os::unix::io::AsRawFd;
 use std::os::unix::prelude::{CommandExt, RawFd};
 use std::path::PathBuf;
 use std::process::exit;
-use std::thread;
-use std::time::Duration;
 
 use color_eyre::Report;
 #[cfg(not(target_os = "wasi"))]
@@ -1137,23 +1135,6 @@ impl Shell {
                         .unwrap();
                     Ok(EXIT_SUCCESS)
                 }
-            }
-            "sleep" => {
-                // TODO: requires poll_oneoff implementation
-                if let Some(sec_str) = &args.get(0) {
-                    if let Ok(sec) = sec_str.parse() {
-                        thread::sleep(Duration::new(sec, 0));
-                        Ok(EXIT_SUCCESS)
-                    } else {
-                        output_device
-                            .eprintln(&format!("sleep: invalid time interval `{}`", sec_str));
-                        Ok(EXIT_FAILURE)
-                    }
-                } else {
-                    output_device.eprintln("sleep: missing operand");
-                    Ok(EXIT_FAILURE)
-                }
-            }
             "hexdump" => {
                 if args.is_empty() {
                     output_device.eprintln("hexdump: help: hexdump <filename>");
