@@ -1135,52 +1135,6 @@ impl Shell {
                         .unwrap();
                     Ok(EXIT_SUCCESS)
                 }
-            "hexdump" => {
-                if args.is_empty() {
-                    output_device.eprintln("hexdump: help: hexdump <filename>");
-                    Ok(EXIT_FAILURE)
-                } else {
-                    let contents = fs::read(args.remove(0)).unwrap_or_else(|_| {
-                        output_device.println("hexdump: error: file not found.");
-                        return vec![];
-                    });
-                    let len = contents.len();
-                    let mut v = ['.'; 16];
-                    for j in 0..len {
-                        let c = contents[j] as char;
-                        v[j % 16] = c;
-                        if (j % 16) == 0 {
-                            output_device.print(&format!("{:08x} ", j));
-                        }
-                        if (j % 8) == 0 {
-                            output_device.print(" ");
-                        }
-                        output_device.print(&format!("{:02x} ", c as u8));
-                        if (j + 1) == len || (j % 16) == 15 {
-                            let mut count = 16;
-                            if (j + 1) == len {
-                                count = len % 16;
-                                for _ in 0..(16 - (len % 16)) {
-                                    output_device.print("   ");
-                                }
-                                if count < 8 {
-                                    output_device.print(" ");
-                                }
-                            }
-                            output_device.print(" |");
-                            for c in v.iter_mut().take(count) {
-                                if (0x20..0x7e).contains(&(*c as u8)) {
-                                    output_device.print(&format!("{}", *c as char));
-                                    *c = '.';
-                                } else {
-                                    output_device.print(".");
-                                }
-                            }
-                            output_device.println("|");
-                        }
-                    }
-                    Ok(EXIT_SUCCESS)
-                }
             }
             "purge" => {
                 // remove all mounting points before purging
