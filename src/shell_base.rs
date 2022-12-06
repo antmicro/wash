@@ -30,6 +30,7 @@ use regex::Regex;
 
 use crate::interpreter::interpret;
 use crate::output_device::OutputDevice;
+use crate::internals::INTERNALS_MAP;
 
 type Fd = u16;
 type SerializedPath = String;
@@ -42,8 +43,7 @@ pub const EXIT_CMD_NOT_FOUND: i32 = 127;
 pub const STDIN: Fd = 0;
 pub const STDOUT: Fd = 1;
 pub const STDERR: Fd = 2;
-
-const CLEAR_ESCAPE_CODE: &str = "\x1b[2J\x1b[H";
+pub const CLEAR_ESCAPE_CODE: &str = "\x1b[2J\x1b[H";
 
 enum HistoryExpansion {
     Expanded(String),
@@ -154,7 +154,7 @@ pub fn spawn(
     });
 }
 
-fn path_exists(path: &str) -> io::Result<bool> {
+pub fn path_exists(path: &str) -> io::Result<bool> {
     fs::metadata(path).map(|_| true).or_else(|error| {
         if error.kind() == ErrorKind::NotFound {
             Ok(false)
@@ -318,8 +318,8 @@ pub struct Shell {
     pub vars: HashMap<String, String>,
     pub args: VecDeque<String>,
     pub last_exit_status: i32,
+    pub history: Vec<String>,
 
-    history: Vec<String>,
     history_file: Option<File>,
     should_echo: bool,
     cursor_position: usize,
@@ -931,299 +931,87 @@ impl Shell {
             (redirects, opened_fds, output_device)
         };
 
-        let result: Result<i32, Report> = match command {
-            // built in commands
-            "clear" => {
-                output_device.print(CLEAR_ESCAPE_CODE);
-                Ok(EXIT_SUCCESS)
-            }
-            "exit" => {
-                let exit_code: i32 = {
-                    if args.is_empty() {
-                        EXIT_SUCCESS
-                    } else {
-                        args[0].parse().unwrap()
+        let result: Result<i32, Report> =  if let Some(internal) = INTERNALS_MAP.get(command) {
+            internal(self, args, &mut output_device)
+        } else {
+            let full_path = if command.starts_with('/') {
+                let full_path = PathBuf::from(command);
+                if path_exists(full_path.to_str().unwrap())? {
+                    Ok(full_path)
+                } else {
+                    Err(format!(
+                        "{}: no such file or directory",
+                        full_path.display()
+                    ))
+                }
+            } else if command.starts_with('.') {
+                let path = PathBuf::from(&self.pwd);
+                let full_path = path.join(command);
+                if path_exists(full_path.to_str().unwrap())? {
+                    Ok(full_path)
+                } else {
+                    Err(format!(
+                        "{}: no such file or directory",
+                        full_path.display()
+                    ))
+                }
+            } else {
+                let mut found = false;
+                let mut full_path = PathBuf::new();
+                // get PATH env variable, split it and look for binaries in each directory
+                for bin_dir in env::var("PATH").unwrap_or_default().split(':') {
+                    let bin_dir = PathBuf::from(bin_dir);
+                    full_path = bin_dir.join(&command);
+                    // see https://internals.rust-lang.org/t/the-api-of-path-exists-encourages-broken-code/13817/3
+                    if path_exists(full_path.to_str().unwrap())? {
+                        found = true;
+                        break;
                     }
-                };
-                exit(exit_code);
-            }
-            "pwd" => {
-                output_device.println(&env::current_dir().unwrap().display().to_string());
-                Ok(EXIT_SUCCESS)
-            }
-            "cd" => {
-                let path = if args.is_empty() {
-                    PathBuf::from(env::var("HOME").unwrap())
-                } else if args[0] == "-" {
-                    PathBuf::from(env::var("OLDPWD").unwrap())
-                } else if args[0].starts_with('/') {
-                    PathBuf::from(&args[0])
+                }
+                if found {
+                    Ok(full_path)
                 } else {
-                    PathBuf::from(&self.pwd).join(&args[0])
-                };
+                    Err(format!("{}: command not found", command))
+                }
+            };
 
-                if !path_exists(path.to_str().unwrap())? {
-                    output_device.eprintln(&format!(
-                        "cd: {}: No such file or directory",
-                        path.display()
-                    ));
-                    Ok(EXIT_FAILURE)
-                } else {
-                    let metadata = fs::metadata(&path).unwrap();
-                    if metadata.is_file() {
-                        output_device.eprintln(&format!("cd: {}: Not a directory", path.display()));
-                        Ok(EXIT_FAILURE)
-                    } else {
-                        // TODO: for both targets, chain the commands and exit early if previous
-                        // step fails
-                        env::set_var("OLDPWD", env::current_dir().unwrap().to_str().unwrap());
+            match full_path {
+                Ok(path) => {
+                    let file = File::open(&path).unwrap();
+                    if let Some(Ok(line)) = BufReader::new(file).lines().next() {
+                        // file starts with valid UTF-8, most likely a script
+                        let binary_path = if let Some(path) = line.strip_prefix("#!") {
+                            path.trim().to_string()
+                        } else {
+                            env::var("SHELL").unwrap()
+                        };
+                        args.insert(0, binary_path);
+                        args.insert(1, path.into_os_string().into_string().unwrap());
+                        let args_: Vec<&str> = args.iter().map(|s| &**s).collect();
                         #[cfg(target_os = "wasi")]
-                        {
-                            wasi_ext_lib::set_env("OLDPWD", Some(env::current_dir().unwrap().to_str().unwrap())).unwrap();
-                            let pwd = fs::canonicalize(&path).unwrap();
-                            wasi_ext_lib::chdir(&path.to_str().unwrap()).unwrap();
-                            wasi_ext_lib::set_env("PWD", Some(&pwd.to_str().unwrap())).unwrap();
-                            self.pwd = PathBuf::from(&pwd);
-                        }
-                        #[cfg(not(target_os = "wasi"))]
-                        {
-                            self.pwd = fs::canonicalize(path).unwrap();
-                        }
-                        env::set_var("PWD", &self.pwd);
-                        env::set_current_dir(&self.pwd).unwrap();
-                        Ok(EXIT_SUCCESS)
-                    }
-                }
-            }
-            "history" => {
-                for (i, history_entry) in self.history.iter().enumerate() {
-                    output_device.println(&format!("{}: {}", i + 1, history_entry));
-                }
-                Ok(EXIT_SUCCESS)
-            }
-            "unset" => {
-                if args.is_empty() {
-                    output_device.eprintln("unset: help: unset <VAR> [<VAR>] ...");
-                    Ok(EXIT_FAILURE)
-                } else {
-                    for arg in args {
-                        if arg == "PWD" || arg == "HOME" {
-                            output_device.println(&format!("unset: cannot unset {}", &arg));
-                        } else {
-                            self.vars.remove(arg);
-                            if env::var(&arg).is_ok() {
-                                env::remove_var(&arg);
-                                #[cfg(target_os = "wasi")]
-                                wasi_ext_lib::set_env(arg, None).unwrap();
+                        // TODO: how does this interact with stdin redirects inside the script?
+                        let mut redirects = redirects.clone();
+                        // TODO: we should not unwrap here
+                        Ok(spawn(&args_[0], &args_[1..], env, background, &*redirects).unwrap())
+                    } else {
+                        // most likely WASM binary
+                        args.insert(0, path.into_os_string().into_string().unwrap());
+                        let args_: Vec<&str> = args.iter().map(|s| &**s).collect();
+                        match spawn(&args_[0], &args_[1..], env, background, &redirects) {
+                            // nonempty output message means that binary couldn't be executed
+                            Err(e) => {
+                                output_device.eprintln(
+                                    &format!(
+                                    "{}: could not execute binary (os error {})", env!("CARGO_PKG_NAME"), e));
+                                Ok(EXIT_FAILURE)
                             }
-                        }
-                    }
-                    Ok(EXIT_SUCCESS)
-                }
-            }
-            "declare" => {
-                if args.is_empty() {
-                    // TODO: we should join and sort the variables!
-                    for (key, value) in self.vars.iter() {
-                        output_device.println(&format!("{}={}", key, value));
-                    }
-                    for (key, value) in env::vars() {
-                        output_device.println(&format!("{}={}", key, value));
-                    }
-                } else if args[0] == "-x" || args[0] == "+x" {
-                    // if -x is provided declare works as export
-                    // if +x then makes global var local
-                    for arg in args.iter().skip(1) {
-                        if args[0] == "-x" {
-                            if let Some((key, value)) = arg.split_once("=") {
-                                #[cfg(target_os = "wasi")]
-                                wasi_ext_lib::set_env(key, Some(value)).unwrap();
-                                std::env::set_var(key, value);
-                            }
-                        } else if let Some((key, value)) = arg.split_once("=") {
-                            #[cfg(target_os = "wasi")]
-                            wasi_ext_lib::set_env(key, None).unwrap();
-                            self.vars.insert(key.to_string(), value.to_string());
-                        } else {
-                            let value = env::var(arg).unwrap();
-                            #[cfg(target_os = "wasi")]
-                            wasi_ext_lib::set_env(arg, None).unwrap();
-                            self.vars.insert(arg.clone(), value.clone());
-                        }
-                    }
-                } else {
-                    for arg in args {
-                        if let Some((key, value)) = arg.split_once("=") {
-                            self.vars.insert(key.to_string(), value.to_string());
+                            Ok(e) => Ok(e)
                         }
                     }
                 }
-                Ok(EXIT_SUCCESS)
-            }
-            "export" => {
-                // export creates an env value if A=B notation is used,
-                // or just copies a local var to env if "=" is not used.
-                // Export on nonexisting local var exports empty variable.
-                if args.is_empty() {
-                    output_device
-                        .eprintln("export: help: export <VAR>[=<VALUE>] [<VAR>[=<VALUE>]] ...");
+                Err(reason) => {
+                    output_device.eprintln(&format!("{}: {}", env!("CARGO_PKG_NAME"), &reason));
                     Ok(EXIT_FAILURE)
-                } else {
-                    for arg in args {
-                        if let Some((key, value)) = arg.split_once("=") {
-                            self.vars.remove(key);
-                            #[cfg(not(target_os = "wasi"))]
-                            env::set_var(&key, &value);
-                            #[cfg(target_os = "wasi")]
-                            wasi_ext_lib::set_env(&key, Some(&value)).unwrap();
-                        } else if let Some(value) = self.vars.remove(arg) {
-                            #[cfg(not(target_os = "wasi"))]
-                            env::set_var(&arg, &value);
-                            #[cfg(target_os = "wasi")]
-                            wasi_ext_lib::set_env(&arg, Some(&value)).unwrap();
-                        } else {
-                            #[cfg(not(target_os = "wasi"))]
-                            env::set_var(&arg, "");
-                            #[cfg(target_os = "wasi")]
-                            wasi_ext_lib::set_env(&arg, Some("")).unwrap();
-                        }
-                    }
-                    Ok(EXIT_SUCCESS)
-                }
-            }
-            "source" => {
-                if let Some(filename) = args.get(0) {
-                    self.run_script(filename).unwrap();
-                    Ok(EXIT_SUCCESS)
-                } else {
-                    output_device.eprintln("source: help: source <filename>");
-                    Ok(EXIT_FAILURE)
-                }
-            }
-            "write" => {
-                if args.len() < 2 {
-                    output_device.eprintln("write: help: write <filename> <contents>");
-                    Ok(EXIT_FAILURE)
-                } else {
-                    let filename = args.remove(0);
-                    let content = args.join(" ");
-                    match fs::write(&filename, &content) {
-                        Ok(_) => Ok(EXIT_SUCCESS),
-                        Err(error) => {
-                            output_device.eprintln(&format!(
-                                "write: failed to write to file '{}': {}",
-                                filename, error
-                            ));
-                            Ok(EXIT_FAILURE)
-                        }
-                    }
-                }
-            }
-            "shift" => {
-                if args.len() > 1 {
-                    output_device.eprintln("shift: too many arguments");
-                    Ok(EXIT_FAILURE)
-                } else if let Some(n) = &args.get(0) {
-                    if let Ok(m) = n.parse::<i32>() {
-                        if m < 0 {
-                            output_device.eprintln(&format!("shift: {}: shift count out of range", m));
-                            Ok(EXIT_FAILURE)
-                        } else if m as usize <= self.args.len() {
-                            _ = self.args.drain(0..m as usize);
-                            Ok(EXIT_SUCCESS)
-                        } else {
-                            Ok(EXIT_FAILURE)
-                        }
-                    } else {
-                        output_device.eprintln(&format!("shift: {}: numeric argument required", n));
-                        Ok(EXIT_FAILURE)
-                    }
-                } else {
-                    _ = self.args.pop_front();
-                    Ok(EXIT_SUCCESS)
-                }
-            }
-            // external commands or command not found
-            _ => {
-                let full_path = if command.starts_with('/') {
-                    let full_path = PathBuf::from(command);
-                    if path_exists(full_path.to_str().unwrap())? {
-                        Ok(full_path)
-                    } else {
-                        Err(format!(
-                            "{}: no such file or directory",
-                            full_path.display()
-                        ))
-                    }
-                } else if command.starts_with('.') {
-                    let path = PathBuf::from(&self.pwd);
-                    let full_path = path.join(command);
-                    if path_exists(full_path.to_str().unwrap())? {
-                        Ok(full_path)
-                    } else {
-                        Err(format!(
-                            "{}: no such file or directory",
-                            full_path.display()
-                        ))
-                    }
-                } else {
-                    let mut found = false;
-                    let mut full_path = PathBuf::new();
-                    // get PATH env variable, split it and look for binaries in each directory
-                    for bin_dir in env::var("PATH").unwrap_or_default().split(':') {
-                        let bin_dir = PathBuf::from(bin_dir);
-                        full_path = bin_dir.join(&command);
-                        // see https://internals.rust-lang.org/t/the-api-of-path-exists-encourages-broken-code/13817/3
-                        if path_exists(full_path.to_str().unwrap())? {
-                            found = true;
-                            break;
-                        }
-                    }
-                    if found {
-                        Ok(full_path)
-                    } else {
-                        Err(format!("{}: command not found", command))
-                    }
-                };
-
-                match full_path {
-                    Ok(path) => {
-                        let file = File::open(&path).unwrap();
-                        if let Some(Ok(line)) = BufReader::new(file).lines().next() {
-                            // file starts with valid UTF-8, most likely a script
-                            let binary_path = if let Some(path) = line.strip_prefix("#!") {
-                                path.trim().to_string()
-                            } else {
-                                env::var("SHELL").unwrap()
-                            };
-                            args.insert(0, binary_path);
-                            args.insert(1, path.into_os_string().into_string().unwrap());
-                            let args_: Vec<&str> = args.iter().map(|s| &**s).collect();
-                            #[cfg(target_os = "wasi")]
-                            // TODO: how does this interact with stdin redirects inside the script?
-                            let mut redirects = redirects.clone();
-                            // TODO: we should not unwrap here
-                            Ok(spawn(&args_[0], &args_[1..], env, background, &*redirects).unwrap())
-                        } else {
-                            // most likely WASM binary
-                            args.insert(0, path.into_os_string().into_string().unwrap());
-                            let args_: Vec<&str> = args.iter().map(|s| &**s).collect();
-                            match spawn(&args_[0], &args_[1..], env, background, &redirects) {
-                                // nonempty output message means that binary couldn't be executed
-                                Err(e) => {
-                                    output_device.eprintln(
-                                        &format!(
-                                        "{}: could not execute binary (os error {})", env!("CARGO_PKG_NAME"), e));
-                                    Ok(EXIT_FAILURE)
-                                }
-                                Ok(e) => Ok(e)
-                            }
-                        }
-                    }
-                    Err(reason) => {
-                        output_device.eprintln(&format!("{}: {}", env!("CARGO_PKG_NAME"), &reason));
-                        Ok(EXIT_FAILURE)
-                    }
                 }
             }
         };

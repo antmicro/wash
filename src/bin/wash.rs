@@ -1,5 +1,3 @@
-#[cfg(target_os = "wasi")]
-use std::collections::HashMap;
 use std::collections::VecDeque;
 use std::env;
 use std::io;
