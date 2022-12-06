@@ -1119,48 +1119,6 @@ impl Shell {
                     }
                 }
             }
-            "purge" => {
-                // remove all mounting points before purging
-                spawn("/usr/bin/umount", &["-a"], env, background, &redirects).unwrap();
-                // close history file before deleting it
-                self.history_file = None;
-                fn traverse(path: &PathBuf, paths: &mut Vec<String>) -> io::Result<()>{
-                    if let Ok(a) = fs::read_dir(path) {
-                        for entry in a {
-                            let entry = entry?;
-                            let path = entry.path();
-                            let filename = String::from(path.to_str().unwrap());
-                            if entry.file_type()?.is_dir() {
-                                traverse(&entry.path(), paths)?;
-                            }
-                            paths.push(filename);
-                        }
-                    }
-                    Ok(())
-                }
-
-                let mut files: Vec<String> = vec![];
-                output_device.println("Starting purge...");
-                output_device.println("Removing /filesystem-initiated");
-                if let Err(e) = fs::remove_file("/filesystem-initiated") {
-                    output_device.eprintln(&format!("Could not remove /filesystem-initiated: {:?}", e));
-                }
-                traverse(&PathBuf::from("/"), &mut files)?;
-                for i in files {
-                    let path_obj = PathBuf::from(&i);
-                    output_device.println(&format!("Removing {}", i));
-                    if let Err(e) = if path_obj.is_dir() {
-                        fs::remove_dir(path_obj)
-                    } else {
-                        fs::remove_file(path_obj)
-                    } {
-                        output_device.eprintln(&format!("Could not remove {}: {:?}", i, e));
-                    }
-                }
-                #[cfg(target_os = "wasi")]
-                let _ = wasi_ext_lib::clean_inodes();
-                Ok(EXIT_SUCCESS)
-            }
             "shift" => {
                 if args.len() > 1 {
                     output_device.eprintln("shift: too many arguments");
