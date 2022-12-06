@@ -19,9 +19,6 @@ glob = "0.3"
 [target.'cfg(target_os = "wasi")'.dependencies]
 wasi_ext_lib = { git = "https://github.com/antmicro/wasi_ext_lib.git", branch = "main", features = ["hterm"] }
 
-[dependencies.iterm2]
-git = "https://github.com/Noskcaj19/iterm2"
-
 [profile]
 [profile.release]
 opt-level = "s"

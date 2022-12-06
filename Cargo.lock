@@ -59,12 +59,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "base64"
-version = "0.13.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9e1b586273c5702936fe7b7d6896644d8be71e6314cfe09d3167c95f712589e8"
-
-[[package]]
 name = "bindgen"
 version = "0.61.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -297,14 +291,6 @@ checksum = "1885e79c1fc4b10f0e172c475f458b7f7b93061064d98c3293e98c5ba0c8b399"
 dependencies = [
  "autocfg",
  "hashbrown",
-]
-
-[[package]]
-name = "iterm2"
-version = "0.3.0"
-source = "git+https://github.com/Noskcaj19/iterm2#a2a7060a9ff6f544e4cb0533db0c249b9b30226b"
-dependencies = [
- "base64",
 ]
 
 [[package]]
@@ -667,7 +653,6 @@ dependencies = [
  "command-fds",
  "conch-parser",
  "glob",
- "iterm2",
  "lazy_static",
  "libc",
  "os_pipe",

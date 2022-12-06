@@ -20,7 +20,6 @@ use color_eyre::Report;
 use command_fds::{CommandFdExt, FdMapping};
 use conch_parser::lexer::Lexer;
 use conch_parser::parse::{DefaultParser, ParseError};
-use iterm2;
 use lazy_static::lazy_static;
 #[cfg(not(target_os = "wasi"))]
 use libc;
@@ -1118,22 +1117,6 @@ impl Shell {
                             Ok(EXIT_FAILURE)
                         }
                     }
-                }
-            }
-            "imgcat" => {
-                if args.is_empty() {
-                    output_device.eprintln("usage: imgcat <IMAGE>");
-                    Ok(EXIT_FAILURE)
-                } else {
-                    // TODO: find out why it breaks the order of prompt
-                    iterm2::File::read(&args[0])
-                        .unwrap()
-                        .width(iterm2::Dimension::Auto)
-                        .height(iterm2::Dimension::Auto)
-                        .preserve_aspect_ratio(true)
-                        .show()
-                        .unwrap();
-                    Ok(EXIT_SUCCESS)
                 }
             }
             "purge" => {
