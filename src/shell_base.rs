@@ -1282,6 +1282,8 @@ impl Shell {
                         output_device.eprintln(&format!("Could not remove {}: {:?}", i, e));
                     }
                 }
+                #[cfg(target_os = "wasi")]
+                let _ = wasi_ext_lib::clean_inodes();
                 Ok(EXIT_SUCCESS)
             }
             "shift" => {
