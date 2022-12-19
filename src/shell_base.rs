@@ -320,7 +320,7 @@ pub struct Shell {
     pub last_exit_status: i32,
     pub history: Vec<String>,
 
-    history_file: Option<File>,
+    history_path: PathBuf,
     should_echo: bool,
     cursor_position: usize,
     insert_mode: bool
@@ -333,7 +333,12 @@ impl Shell {
             pwd: PathBuf::from(pwd),
             args,
             history: Vec::new(),
-            history_file: None,
+            history_path: PathBuf::from(
+                if PathBuf::from(env::var("HOME").unwrap()).exists() {
+                    format!("{}/.{}_history", env::var("HOME").unwrap(), env!("CARGO_PKG_NAME"))
+                } else {
+                    format!("{}/.{}_history", env::var("PWD").unwrap(), env!("CARGO_PKG_NAME"))
+                }),
             vars: HashMap::new(),
             last_exit_status: EXIT_SUCCESS,
             cursor_position: 0,
@@ -711,15 +716,6 @@ impl Shell {
             }
         }
 
-        // don't push duplicates of last command to history
-        if Some(&processed) != self.history.last() {
-            self.history.push(processed.clone());
-            // only write to file if it was successfully created
-            if let Some(ref mut history_file) = self.history_file {
-                writeln!(history_file, "{}", &processed).unwrap();
-            }
-        }
-
         if input == processed {
             HistoryExpansion::Unchanged
         } else {
@@ -745,31 +741,14 @@ impl Shell {
                 });
         }
 
-        let history_path = {
-            if PathBuf::from(env::var("HOME").unwrap()).exists() {
-                format!("{}/.{}_history", env::var("HOME").unwrap(), env!("CARGO_PKG_NAME"))
-            } else {
-                format!("{}/.{}_history", env::var("PWD").unwrap(), env!("CARGO_PKG_NAME"))
-            }
-        };
-        if PathBuf::from(&history_path).exists() {
-            self.history = fs::read_to_string(&history_path)
+        if PathBuf::from(&self.history_path).exists() {
+            self.history = fs::read_to_string(&self.history_path)
                 .unwrap()
                 .lines()
                 .map(str::to_string)
                 .collect();
         }
-        self.history_file = match OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&history_path)
-        {
-            Ok(file) => Some(file),
-            Err(error) => {
-                eprintln!("Unable to open file for storing {} history: {}", env!("CARGO_PKG_NAME"), error);
-                None
-            }
-        };
+        
 
         let washrc_path = {
             if PathBuf::from(env::var("HOME").unwrap()).exists() {
@@ -810,7 +789,21 @@ impl Shell {
                     };
                 }
             }
-
+            match OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&self.history_path)
+            {
+                Ok(mut file) => {
+                    if Some(&input) != self.history.last() {
+                        self.history.push(input.clone());
+                        writeln!(file, "{}", &input).unwrap();
+                    }
+                }
+                Err(error) => {
+                    eprintln!("Unable to open file for storing {} history: {}", env!("CARGO_PKG_NAME"), error);
+                }
+            };
             input.clear();
         }
     }
