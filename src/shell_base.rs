@@ -983,7 +983,7 @@ impl Shell {
                         let args_: Vec<&str> = args.iter().map(|s| &**s).collect();
                         #[cfg(target_os = "wasi")]
                         // TODO: how does this interact with stdin redirects inside the script?
-                        let mut redirects = redirects.clone();
+                        let redirects = redirects.clone();
                         // TODO: we should not unwrap here
                         Ok(spawn(&args_[0], &args_[1..], env, background, &*redirects).unwrap())
                     } else {

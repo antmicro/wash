@@ -180,10 +180,10 @@ fn handle_pipeable_command(
 fn handle_compound_command(
     shell: &mut Shell,
     cmd: &ast::DefaultCompoundCommand,
-    background: bool,
-    redirects: &mut Vec<Redirect>,
+    _background: bool,
+    _redirects: &mut Vec<Redirect>,
 ) -> i32 {
-    let ast::CompoundCommand { kind, io } = cmd;
+    let ast::CompoundCommand { kind, io: _ } = cmd;
     match kind {
         ast::CompoundCommandKind::Subshell(subshell_cmds) => {
             // TODO: this should actually spawn a subshell
