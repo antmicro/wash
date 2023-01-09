@@ -1,11 +1,9 @@
 [package]
-authors = [
-    "Tomasz Karwowski <tkarwowski@internships.antmicro.com",
-    "Peter Gielda <pgielda@antmicro.com",
-]
+authors = [ "Antmicro <antmicro.com>" ]
 edition = "2018"
 name = "wash"
 version = "0.1.0"
+license = "Apache-2.0"
 
 [dependencies]
 clap = "3"
