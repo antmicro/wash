@@ -1,4 +1,10 @@
-#[cfg(not(target_os = "wasi"))]
+/*
+ * Copyright (c) 2022-2023 Antmicro <www.antmicro.com>
+ *
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+ #[cfg(not(target_os = "wasi"))]
 use std::collections::HashMap;
 #[cfg(target_os = "wasi")]
 use std::fs::{OpenOptions, self};
