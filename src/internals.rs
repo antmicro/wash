@@ -17,14 +17,14 @@ use crate::output_device::OutputDevice;
 use crate::shell_base::{EXIT_SUCCESS, EXIT_FAILURE, CLEAR_ESCAPE_CODE};
 use crate::shell_base::path_exists;
 
-type Internal = fn(&mut Shell, &mut Vec<String>, &mut OutputDevice) -> Result<i32, Report>;
+type Internal = fn(&mut Shell, &mut [String], &mut OutputDevice) -> Result<i32, Report>;
 
-fn clear(_shell: &mut Shell, _args: &mut Vec<String>, output_device: &mut OutputDevice) -> Result<i32, Report> {
+fn clear(_shell: &mut Shell, _args: &mut [String], output_device: &mut OutputDevice) -> Result<i32, Report> {
     output_device.print(CLEAR_ESCAPE_CODE);
     Ok(EXIT_SUCCESS)
 }
 
-fn exit(_shell: &mut Shell, args: &mut Vec<String>, _output_device: &mut OutputDevice) -> Result<i32, Report> {
+fn exit(_shell: &mut Shell, args: &mut [String], _output_device: &mut OutputDevice) -> Result<i32, Report> {
     let exit_code: i32 = {
         if args.is_empty() {
             EXIT_SUCCESS
@@ -35,12 +35,12 @@ fn exit(_shell: &mut Shell, args: &mut Vec<String>, _output_device: &mut OutputD
     std::process::exit(exit_code);
 }
 
-fn pwd(_shell: &mut Shell, _args: &mut Vec<String>, output_device: &mut OutputDevice) -> Result<i32, Report> {
+fn pwd(_shell: &mut Shell, _args: &mut [String], output_device: &mut OutputDevice) -> Result<i32, Report> {
     output_device.println(&env::current_dir().unwrap().display().to_string());
     Ok(EXIT_SUCCESS)
 }
 
-fn cd(shell: &mut Shell, args: &mut Vec<String>, output_device: &mut OutputDevice) -> Result<i32, Report> {
+fn cd(shell: &mut Shell, args: &mut [String], output_device: &mut OutputDevice) -> Result<i32, Report> {
     let path = if args.is_empty() {
         PathBuf::from(env::var("HOME").unwrap())
     } else if args[0] == "-" {
@@ -84,14 +84,14 @@ fn cd(shell: &mut Shell, args: &mut Vec<String>, output_device: &mut OutputDevic
     }
 }
 
-fn history(shell: &mut Shell, _args: &mut Vec<String>, output_device: &mut OutputDevice) -> Result<i32, Report> {
+fn history(shell: &mut Shell, _args: &mut [String], output_device: &mut OutputDevice) -> Result<i32, Report> {
     for (i, history_entry) in shell.history.iter().enumerate() {
         output_device.println(&format!("{}: {}", i + 1, history_entry));
     }
     Ok(EXIT_SUCCESS)
 }
 
-fn unset(shell: &mut Shell, args: &mut Vec<String>, output_device: &mut OutputDevice) -> Result<i32, Report> {
+fn unset(shell: &mut Shell, args: &mut [String], output_device: &mut OutputDevice) -> Result<i32, Report> {
     if args.is_empty() {
         output_device.eprintln("unset: help: unset <VAR> [<VAR>] ...");
         Ok(EXIT_FAILURE)
@@ -112,7 +112,7 @@ fn unset(shell: &mut Shell, args: &mut Vec<String>, output_device: &mut OutputDe
     }
 }
 
-fn declare(shell: &mut Shell, args: &mut Vec<String>, output_device: &mut OutputDevice) -> Result<i32, Report> {
+fn declare(shell: &mut Shell, args: &mut [String], output_device: &mut OutputDevice) -> Result<i32, Report> {
     if args.is_empty() {
         // TODO: we should join and sort the variables!
         for (key, value) in shell.vars.iter() {
@@ -126,13 +126,13 @@ fn declare(shell: &mut Shell, args: &mut Vec<String>, output_device: &mut Output
         // if +x then makes global var local
         for arg in args.iter().skip(1) {
             if args[0] == "-x" {
-                if let Some((key, value)) = arg.split_once("=") {
+                if let Some((key, value)) = arg.split_once('=') {
                     #[cfg(target_os = "wasi")]
                     wasi_ext_lib::set_env(key, Some(value)).unwrap();
                     #[cfg(not(target_os = "wasi"))]
                     env::set_var(key, value);
                 }
-            } else if let Some((key, value)) = arg.split_once("=") {
+            } else if let Some((key, value)) = arg.split_once('=') {
                 #[cfg(target_os = "wasi")]
                 wasi_ext_lib::set_env(key, None).unwrap();
                 shell.vars.insert(key.to_string(), value.to_string());
@@ -145,7 +145,7 @@ fn declare(shell: &mut Shell, args: &mut Vec<String>, output_device: &mut Output
         }
     } else {
         for arg in args {
-            if let Some((key, value)) = arg.split_once("=") {
+            if let Some((key, value)) = arg.split_once('=') {
                 shell.vars.insert(key.to_string(), value.to_string());
             }
         }
@@ -153,7 +153,7 @@ fn declare(shell: &mut Shell, args: &mut Vec<String>, output_device: &mut Output
     Ok(EXIT_SUCCESS)
 }
 
-fn export(shell: &mut Shell, args: &mut Vec<String>, output_device: &mut OutputDevice) -> Result<i32, Report> {
+fn export(shell: &mut Shell, args: &mut [String], output_device: &mut OutputDevice) -> Result<i32, Report> {
     // export creates an env value if A=B notation is used,
     // or just copies a local var to env if "=" is not used.
     // Export on nonexisting local var exports empty variable.
@@ -163,20 +163,20 @@ fn export(shell: &mut Shell, args: &mut Vec<String>, output_device: &mut OutputD
         Ok(EXIT_FAILURE)
     } else {
         for arg in args {
-            if let Some((key, value)) = arg.split_once("=") {
+            if let Some((key, value)) = arg.split_once('=') {
                 shell.vars.remove(key);
                 #[cfg(not(target_os = "wasi"))]
-                env::set_var(&key, &value);
+                env::set_var(key, value);
                 #[cfg(target_os = "wasi")]
                 wasi_ext_lib::set_env(&key, Some(&value)).unwrap();
             } else if let Some(value) = shell.vars.remove(arg) {
                 #[cfg(not(target_os = "wasi"))]
-                env::set_var(&arg, &value);
+                env::set_var(arg, value);
                 #[cfg(target_os = "wasi")]
                 wasi_ext_lib::set_env(&arg, Some(&value)).unwrap();
             } else {
                 #[cfg(not(target_os = "wasi"))]
-                env::set_var(&arg, "");
+                env::set_var(arg, "");
                 #[cfg(target_os = "wasi")]
                 wasi_ext_lib::set_env(&arg, Some("")).unwrap();
             }
@@ -185,7 +185,7 @@ fn export(shell: &mut Shell, args: &mut Vec<String>, output_device: &mut OutputD
     }
 }
 
-fn source(shell: &mut Shell, args: &mut Vec<String>, output_device: &mut OutputDevice) -> Result<i32, Report> {
+fn source(shell: &mut Shell, args: &mut [String], output_device: &mut OutputDevice) -> Result<i32, Report> {
     if let Some(filename) = args.get(0) {
         shell.run_script(filename).unwrap();
         Ok(EXIT_SUCCESS)
@@ -195,14 +195,14 @@ fn source(shell: &mut Shell, args: &mut Vec<String>, output_device: &mut OutputD
     }
 }
 
-fn write(_shell: &mut Shell, args: &mut Vec<String>, output_device: &mut OutputDevice) -> Result<i32, Report> {
+fn write(_shell: &mut Shell, args: &mut [String], output_device: &mut OutputDevice) -> Result<i32, Report> {
     if args.len() < 2 {
         output_device.eprintln("write: help: write <filename> <contents>");
         Ok(EXIT_FAILURE)
     } else {
-        let filename = args.remove(0);
+        let filename = &args[1];
         let content = args.join(" ");
-        match fs::write(&filename, &content) {
+        match fs::write(filename, &content) {
             Ok(_) => Ok(EXIT_SUCCESS),
             Err(error) => {
                 output_device.eprintln(&format!(
@@ -215,7 +215,7 @@ fn write(_shell: &mut Shell, args: &mut Vec<String>, output_device: &mut OutputD
     }
 }
 
-fn shift(shell: &mut Shell, args: &mut Vec<String>, output_device: &mut OutputDevice) -> Result<i32, Report> {
+fn shift(shell: &mut Shell, args: &mut [String], output_device: &mut OutputDevice) -> Result<i32, Report> {
     if args.len() > 1 {
         output_device.eprintln("shift: too many arguments");
         Ok(EXIT_FAILURE)

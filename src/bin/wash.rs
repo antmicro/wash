@@ -41,7 +41,7 @@ fn main() {
         env!("CARGO_PKG_VERSION"),
         env!("SHELL_COMMIT_HASH"),
         env!("SHELL_TARGET"),
-        env!("SHELL_COMMIT_DATE").split("-").collect::<Vec<&str>>()[0],
+        env!("SHELL_COMMIT_DATE").split('-').collect::<Vec<&str>>()[0],
     );
     let matches = Command::new(name)
         .version(version_short)

@@ -187,7 +187,7 @@ fn handle_compound_command(
     shell: &mut Shell,
     cmd: &ast::DefaultCompoundCommand,
     _background: bool,
-    _redirects: &mut Vec<Redirect>,
+    _redirects: &mut [Redirect],
 ) -> i32 {
     let ast::CompoundCommand { kind, io: _ } = cmd;
     match kind {
@@ -203,7 +203,7 @@ fn handle_compound_command(
             let mut exit_status = EXIT_SUCCESS;
             if let Some(w) = words {
                 for word in w {
-                    env::set_var(var, handle_top_level_word(shell, &word).unwrap());
+                    env::set_var(var, handle_top_level_word(shell, word).unwrap());
                     for command in body {
                         exit_status = handle_top_level_command(shell, command);
                     }
@@ -216,11 +216,11 @@ fn handle_compound_command(
             let mut guard_exit = EXIT_FAILURE;
             for guard_body in conditionals {
                 for command in &guard_body.guard {
-                    guard_exit = handle_top_level_command(shell, &command);
+                    guard_exit = handle_top_level_command(shell, command);
                 }
                 if guard_exit == EXIT_SUCCESS {
                     for command in &guard_body.body {
-                        exit_status = handle_top_level_command(shell, &command);
+                        exit_status = handle_top_level_command(shell, command);
                     }
                     break;
                 }
@@ -234,8 +234,8 @@ fn handle_compound_command(
         },
         ast::CompoundCommandKind::While(guard_body) => {
             let mut exit_status = EXIT_SUCCESS;
-            while guard_body.guard.iter().fold(EXIT_SUCCESS, |_, x| { handle_top_level_command(shell, &x) }) == EXIT_SUCCESS {
-                exit_status = guard_body.body.iter().fold(EXIT_SUCCESS, |_, x| { handle_top_level_command(shell, &x) })
+            while guard_body.guard.iter().fold(EXIT_SUCCESS, |_, x| { handle_top_level_command(shell, x) }) == EXIT_SUCCESS {
+                exit_status = guard_body.body.iter().fold(EXIT_SUCCESS, |_, x| { handle_top_level_command(shell, x) })
             }
             exit_status
         }
@@ -244,7 +244,7 @@ fn handle_compound_command(
             if let Some(handled_word) = handle_top_level_word(shell, word) {
                 for arm in arms {
                     if arm.patterns.iter().any(|pattern| {
-                        if let Some(handled_pattern) = handle_top_level_word(shell, &pattern) {
+                        if let Some(handled_pattern) = handle_top_level_word(shell, pattern) {
                             if let Ok(pat) = Pattern::new(&handled_pattern) {
                                 pat.matches(&handled_word)
                             } else {
@@ -258,7 +258,7 @@ fn handle_compound_command(
                     }) {
                         exit_status = arm.body.iter().fold(
                             EXIT_SUCCESS,
-                            |_, x| { handle_top_level_command(shell, &x) }
+                            |_, x| { handle_top_level_command(shell, x) }
                         );
                         break;
                     }
@@ -320,7 +320,7 @@ fn handle_simple_command(
                                 s.unwrap().into_os_string().into_string().unwrap()
                             }
                         }).peekable();
-                        if let None = globbed.peek() {
+                        if globbed.peek().is_none() {
                             args.push(arg);
                         } else {
                             args.extend(globbed);
@@ -343,7 +343,7 @@ fn handle_simple_command(
         for (key, value) in env.iter() {
             // if it's a global update env, if shell variable update only vars
             if env::var(key).is_ok() {
-                env::set_var(&key, &value);
+                env::set_var(key, value);
                 #[cfg(target_os = "wasi")]
                 let _ = wasi_ext_lib::set_env(key, Some(value));
             } else {
@@ -522,12 +522,12 @@ fn handle_simple_word<'a>(shell: &'a Shell, word: &'a ast::DefaultSimpleWord) ->
                 )
             }
             ast::Parameter::At => {
-                if shell.args.len() > 0 {
+                if shell.args.is_empty() {
                     Some(shell.args.range(1..).cloned().collect::<Vec<String>>().join(" "))
                 } else { Some(String::from(" ")) }
             },
             ast::Parameter::Pound => {
-                Some(format!("{}", if shell.args.len() != 0 {
+                Some(format!("{}", if shell.args.is_empty() {
                     shell.args.len() - 1
                 } else { 0 }))
             },

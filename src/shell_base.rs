@@ -151,8 +151,7 @@ pub fn spawn(
             .unwrap();
 
         if !background {
-            let exit_status = spawned.wait().unwrap().code().unwrap();
-            exit_status
+            spawned.wait().unwrap().code().unwrap()
         } else {
             EXIT_SUCCESS
         }
@@ -171,7 +170,7 @@ pub fn path_exists(path: &str) -> io::Result<bool> {
 }
 
 #[cfg(not(target_os = "wasi"))]
-fn preprocess_redirects(redirects: &mut Vec<Redirect>) -> (
+fn preprocess_redirects(redirects: &mut [Redirect]) -> (
     HashMap<RawFd, OpenedFd>, io::Result<()>
 ) {
     let mut fd_redirects = HashMap::from([
@@ -446,7 +445,7 @@ impl Shell {
                                             history_entry_to_display = 0;
                                             // bring cursor to the end so that clearing later starts from
                                             // proper position
-                                            self.get_cursor_to_end(&input);
+                                            self.get_cursor_to_end(input);
                                             *input =
                                                 self.history[0].clone();
                                             self.cursor_position = input.len();
@@ -459,7 +458,7 @@ impl Shell {
                                         if history_entry_to_display != -1 {
                                             // bring cursor to the end so that clearing later starts from
                                             // proper position
-                                            self.get_cursor_to_end(&input);
+                                            self.get_cursor_to_end(input);
                                             *input = input_stash.clone();
                                             history_entry_to_display = -1;
                                             self.cursor_position = input.len();
@@ -526,7 +525,7 @@ impl Shell {
                                     }
                                     // bring cursor to the end so that clearing later starts from
                                     // proper position
-                                    self.get_cursor_to_end(&input);
+                                    self.get_cursor_to_end(input);
                                     *input =
                                         self.history[history_entry_to_display as usize].clone();
                                     self.cursor_position = input.len();
@@ -539,7 +538,7 @@ impl Shell {
                                 if history_entry_to_display != -1 {
                                     // bring cursor to the end so that clearing later starts from
                                     // proper position
-                                    self.get_cursor_to_end(&input);
+                                    self.get_cursor_to_end(input);
                                     if self.history.len() - 1 > (history_entry_to_display as usize)
                                     {
                                         history_entry_to_display += 1;
@@ -704,6 +703,9 @@ impl Shell {
             static ref STRING_RE: Regex = Regex::new(r"(?:^|[^\[])!(\w+)").unwrap();
         }
         // for each match
+        // TODO: Clippy warns about redundant clone here, removing it produces errors
+        // find out if there is a better solution that would satisfy Clippy
+        #[allow(clippy::redundant_clone)]
         for captures in STRING_RE.captures_iter(&processed.clone()) {
             let full_match = captures.get(0).unwrap().as_str();
             let group_match = captures.get(1).unwrap().as_str();
@@ -871,7 +873,7 @@ impl Shell {
         args: &mut Vec<String>,
         env: &HashMap<String, String>,
         background: bool,
-        redirects: &mut Vec<Redirect>,
+        redirects: &mut [Redirect],
     ) -> Result<i32, Report> {
         #[cfg(target_os = "wasi")]
         let mut output_device =  match OutputDevice::new(&redirects) {
@@ -960,7 +962,7 @@ impl Shell {
                 // get PATH env variable, split it and look for binaries in each directory
                 for bin_dir in env::var("PATH").unwrap_or_default().split(':') {
                     let bin_dir = PathBuf::from(bin_dir);
-                    full_path = bin_dir.join(&command);
+                    full_path = bin_dir.join(command);
                     // see https://internals.rust-lang.org/t/the-api-of-path-exists-encourages-broken-code/13817/3
                     if path_exists(full_path.to_str().unwrap())? {
                         found = true;
@@ -991,12 +993,12 @@ impl Shell {
                         // TODO: how does this interact with stdin redirects inside the script?
                         let redirects = redirects.clone();
                         // TODO: we should not unwrap here
-                        Ok(spawn(&args_[0], &args_[1..], env, background, &*redirects).unwrap())
+                        Ok(spawn(args_[0], &args_[1..], env, background, &redirects).unwrap())
                     } else {
                         // most likely WASM binary
                         args.insert(0, path.into_os_string().into_string().unwrap());
                         let args_: Vec<&str> = args.iter().map(|s| &**s).collect();
-                        match spawn(&args_[0], &args_[1..], env, background, &redirects) {
+                        match spawn(args_[0], &args_[1..], env, background, &redirects) {
                             // nonempty output message means that binary couldn't be executed
                             Err(e) => {
                                 output_device.eprintln(
