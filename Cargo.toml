@@ -1,5 +1,5 @@
 [package]
-authors = [ "Antmicro <antmicro.com>" ]
+author_email='contact@antmicro.com'
 edition = "2018"
 name = "wash"
 version = "0.1.0"
