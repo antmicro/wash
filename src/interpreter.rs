@@ -522,12 +522,12 @@ fn handle_simple_word<'a>(shell: &'a Shell, word: &'a ast::DefaultSimpleWord) ->
                 )
             }
             ast::Parameter::At => {
-                if shell.args.is_empty() {
+                if !shell.args.is_empty() {
                     Some(shell.args.range(1..).cloned().collect::<Vec<String>>().join(" "))
                 } else { Some(String::from(" ")) }
             },
             ast::Parameter::Pound => {
-                Some(format!("{}", if shell.args.is_empty() {
+                Some(format!("{}", if !shell.args.is_empty() {
                     shell.args.len() - 1
                 } else { 0 }))
             },
