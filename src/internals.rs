@@ -69,8 +69,8 @@ fn cd(shell: &mut Shell, args: &mut [String], output_device: &mut OutputDevice) 
             {
                 wasi_ext_lib::set_env("OLDPWD", Some(env::current_dir().unwrap().to_str().unwrap())).unwrap();
                 shell.pwd = fs::canonicalize(&path).unwrap();
-                wasi_ext_lib::set_env("PWD", Some(&shell.pwd.to_str().unwrap())).unwrap();
-                wasi_ext_lib::chdir(&shell.pwd.to_str().unwrap()).unwrap();
+                wasi_ext_lib::set_env("PWD", Some(shell.pwd.to_str().unwrap())).unwrap();
+                wasi_ext_lib::chdir(shell.pwd.to_str().unwrap()).unwrap();
             }
             #[cfg(not(target_os = "wasi"))]
             {
@@ -116,10 +116,10 @@ fn declare(shell: &mut Shell, args: &mut [String], output_device: &mut OutputDev
     if args.is_empty() {
         // TODO: we should join and sort the variables!
         for (key, value) in shell.vars.iter() {
-            output_device.println(&format!("{}={}", key, value));
+            output_device.println(&format!("{key}={value}"));
         }
         for (key, value) in env::vars() {
-            output_device.println(&format!("{}={}", key, value));
+            output_device.println(&format!("{key}={value}"));
         }
     } else if args[0] == "-x" || args[0] == "+x" {
         // if -x is provided declare works as export
@@ -168,17 +168,17 @@ fn export(shell: &mut Shell, args: &mut [String], output_device: &mut OutputDevi
                 #[cfg(not(target_os = "wasi"))]
                 env::set_var(key, value);
                 #[cfg(target_os = "wasi")]
-                wasi_ext_lib::set_env(&key, Some(&value)).unwrap();
+                wasi_ext_lib::set_env(key, Some(value)).unwrap();
             } else if let Some(value) = shell.vars.remove(arg) {
                 #[cfg(not(target_os = "wasi"))]
                 env::set_var(arg, value);
                 #[cfg(target_os = "wasi")]
-                wasi_ext_lib::set_env(&arg, Some(&value)).unwrap();
+                wasi_ext_lib::set_env(arg, Some(&value)).unwrap();
             } else {
                 #[cfg(not(target_os = "wasi"))]
                 env::set_var(arg, "");
                 #[cfg(target_os = "wasi")]
-                wasi_ext_lib::set_env(&arg, Some("")).unwrap();
+                wasi_ext_lib::set_env(arg, Some("")).unwrap();
             }
         }
         Ok(EXIT_SUCCESS)
@@ -202,13 +202,10 @@ fn write(_shell: &mut Shell, args: &mut [String], output_device: &mut OutputDevi
     } else {
         let filename = &args[1];
         let content = args.join(" ");
-        match fs::write(filename, &content) {
+        match fs::write(filename, content) {
             Ok(_) => Ok(EXIT_SUCCESS),
             Err(error) => {
-                output_device.eprintln(&format!(
-                    "write: failed to write to file '{}': {}",
-                    filename, error
-                ));
+                output_device.eprintln(&format!("write: failed to write to file '{filename}': {error}"));
                 Ok(EXIT_FAILURE)
             }
         }
@@ -222,7 +219,7 @@ fn shift(shell: &mut Shell, args: &mut [String], output_device: &mut OutputDevic
     } else if let Some(n) = &args.get(0) {
         if let Ok(m) = n.parse::<i32>() {
             if m < 0 {
-                output_device.eprintln(&format!("shift: {}: shift count out of range", m));
+                output_device.eprintln(&format!("shift: {m}: shift count out of range"));
                 Ok(EXIT_FAILURE)
             } else if m as usize <= shell.args.len() {
                 _ = shell.args.drain(0..m as usize);
@@ -231,7 +228,7 @@ fn shift(shell: &mut Shell, args: &mut [String], output_device: &mut OutputDevic
                 Ok(EXIT_FAILURE)
             }
         } else {
-            output_device.eprintln(&format!("shift: {}: numeric argument required", n));
+            output_device.eprintln(&format!("shift: {n}: numeric argument required"));
             Ok(EXIT_FAILURE)
         }
     } else {

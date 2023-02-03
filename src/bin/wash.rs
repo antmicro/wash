@@ -74,10 +74,10 @@ fn main() {
 
     #[cfg(target_os = "wasi")] {
         let _ = wasi_ext_lib::chdir(
-            &match wasi_ext_lib::getcwd() {
+            match wasi_ext_lib::getcwd() {
                 Ok(p) => { pwd = p; &pwd },
                 Err(e) => {
-                    eprintln!("Could not obtain current working dir path (error {})", e);
+                    eprintln!("Could not obtain current working dir path (error {e})");
                     pwd = String::from("/");
                     &pwd
                 }

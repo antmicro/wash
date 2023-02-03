@@ -108,7 +108,7 @@ pub fn spawn(
     #[cfg(target_os = "wasi")] {
         wasi_ext_lib::spawn(
             path, args, env, background,
-            redirects.iter().map(|r| as_ext_redirect(r)).collect())
+            redirects.iter().map(as_ext_redirect).collect())
     }
     #[cfg(not(target_os = "wasi"))]
     return Ok({
@@ -382,7 +382,7 @@ impl Shell {
     fn echo(&self, output: &str) {
         if self.should_echo {
             // TODO: should this maybe use OutputDevice too?
-            print!("{}", output);
+            print!("{output}");
         }
     }
 
@@ -508,7 +508,7 @@ impl Shell {
                                     _ => {
                                         println!(
                                             "TODO: [ + 0x{:02x} + 0x{:02x}",
-                                            c2[0] as u8, c3[0] as u8
+                                            c2[0], c3[0]
                                         );
                                         escaped = false;
                                     }
@@ -590,7 +590,7 @@ impl Shell {
                                 escaped = false;
                             }
                             _ => {
-                                println!("WE HAVE UNKNOWN CONTROL CODE '[' + {}", c2[0] as u8);
+                                println!("WE HAVE UNKNOWN CONTROL CODE '[' + {}", c2[0]);
                                 escaped = false;
                             }
                         }
@@ -789,11 +789,11 @@ impl Shell {
                     continue;
                 }
                 HistoryExpansion::EventNotFound(event) => {
-                    eprintln!("{}: event not found", event);
+                    eprintln!("{event}: event not found");
                 }
                 HistoryExpansion::Unchanged => {
                     if let Err(error) = self.handle_input(&input) {
-                        eprintln!("{:#?}", error);
+                        eprintln!("{error:#?}");
                     };
                 }
             }
@@ -854,7 +854,7 @@ impl Shell {
                             "unexpected end of file".to_string()
                         },
                         ParseError::Custom(t) => {
-                            format!("custom AST error: {:?}", t)
+                            format!("custom AST error: {t:?}")
                         },
                     };
                     eprintln!("{}: {}", env!("CARGO_PKG_NAME"), err_msg);
@@ -876,7 +876,7 @@ impl Shell {
         redirects: &mut [Redirect],
     ) -> Result<i32, Report> {
         #[cfg(target_os = "wasi")]
-        let mut output_device =  match OutputDevice::new(&redirects) {
+        let mut output_device =  match OutputDevice::new(redirects) {
             Ok(o) => o,
             Err(s) => {
                 eprintln!("{}: {}", env!("CARGO_PKG_NAME"), s);
@@ -931,6 +931,8 @@ impl Shell {
 
             (redirects, opened_fds, output_device)
         };
+        #[cfg(not(target_os = "wasi"))]
+        let redirects = &redirects;
 
         let result: Result<i32, Report> =  if let Some(internal) = INTERNALS_MAP.get(command) {
             internal(self, args, &mut output_device)
@@ -972,7 +974,7 @@ impl Shell {
                 if found {
                     Ok(full_path)
                 } else {
-                    Err(format!("{}: command not found", command))
+                    Err(format!("{command}: command not found"))
                 }
             };
 
@@ -990,12 +992,12 @@ impl Shell {
                         args.insert(1, path.into_os_string().into_string().unwrap());
                         let args_: Vec<&str> = args.iter().map(|s| &**s).collect();
                         // TODO: we should not unwrap here
-                        Ok(spawn(args_[0], &args_[1..], env, background, &redirects).unwrap())
+                        Ok(spawn(args_[0], &args_[1..], env, background, redirects).unwrap())
                     } else {
                         // most likely WASM binary
                         args.insert(0, path.into_os_string().into_string().unwrap());
                         let args_: Vec<&str> = args.iter().map(|s| &**s).collect();
-                        match spawn(args_[0], &args_[1..], env, background, &redirects) {
+                        match spawn(args_[0], &args_[1..], env, background, redirects) {
                             // nonempty output message means that binary couldn't be executed
                             Err(e) => {
                                 output_device.eprintln(

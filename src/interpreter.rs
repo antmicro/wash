@@ -99,7 +99,7 @@ fn handle_pipe(
                 background,
                 &mut vec![
                     Redirect::Read((STDIN, format!("/proc/pipe{}.txt", i - 1))),
-                    Redirect::Write((STDOUT, format!("/proc/pipe{}.txt", i))),
+                    Redirect::Write((STDOUT, format!("/proc/pipe{i}.txt"))),
                 ],
             );
         }
@@ -116,7 +116,7 @@ fn handle_pipe(
 
         // TODO: temporary solution before in-memory files get implemented
         for i in 0..cmds.len() - 1 {
-            fs::remove_file(format!("/proc/pipe{}.txt", i)).unwrap();
+            fs::remove_file(format!("/proc/pipe{i}.txt")).unwrap();
         }
         exit_status
     };
@@ -270,7 +270,7 @@ fn handle_compound_command(
             exit_status
         }
         any => {
-            eprintln!("CompoundCommandKind not yet handled: {:#?}", any);
+            eprintln!("CompoundCommandKind not yet handled: {any:#?}");
             EXIT_FAILURE
         }
     }
@@ -433,7 +433,7 @@ fn handle_redirect_type(
                     fd => if let Ok(fd_source) = fd.parse::<u16>() {
                         Some(Redirect::Duplicate((fd_dest as RawFd, fd_source as RawFd)))
                     } else {
-                        eprintln!("DupRead redirect top_level_word not parsed: {:?}", top_level_word);
+                        eprintln!("DupRead redirect top_level_word not parsed: {top_level_word:?}");
                         None
                     }
                 }
@@ -450,7 +450,7 @@ fn handle_redirect_type(
                     fd => if let Ok(fd_source) = fd.parse::<u16>() {
                         Some(Redirect::Duplicate((fd_dest as RawFd, fd_source as RawFd)))
                     } else {
-                        eprintln!("DupWrite redirect top_level_word not parsed: {:?}", top_level_word);
+                        eprintln!("DupWrite redirect top_level_word not parsed: {top_level_word:?}");
                         None
                     }
                 }
@@ -460,7 +460,7 @@ fn handle_redirect_type(
         },
         // TODO: Heredoc (multiline command parsing) implementation
         any => {
-            eprintln!("Redirect not yet handled: {:?}", any);
+            eprintln!("Redirect not yet handled: {any:?}");
             None
         },
     }
@@ -532,12 +532,12 @@ fn handle_simple_word<'a>(shell: &'a Shell, word: &'a ast::DefaultSimpleWord) ->
                 } else { 0 }))
             },
             ast::Parameter::Positional(n) => { Some(String::from(if let Some(a) = &shell.args.get(*n as usize) { a } else { "" })) }
-            any => Some(format!("parameter not yet handled: {:?}", any)),
+            any => Some(format!("parameter not yet handled: {any:?}")),
         },
         ast::SimpleWord::Star => { Some("*".to_string()) }
         ast::SimpleWord::Question => { Some("?".to_string()) }
         ast::SimpleWord::SquareOpen => { Some("[".to_string()) }
         ast::SimpleWord::SquareClose => { Some("]".to_string()) }
-        any => Some(format!("simple word not yet handled: {:?}", any)),
+        any => Some(format!("simple word not yet handled: {any:?}")),
     }
 }

@@ -34,7 +34,7 @@ impl<'a> OutputDevice<'a> {
         for i in redirects.iter() {
             match i {
                 Redirect::Write((_, path)) | Redirect::Read((_, path)) | Redirect::Append((_, path)) =>{
-                    if Path::new(path).is_dir() { return Err(format!("{}: Is a directory", path)) }
+                    if Path::new(path).is_dir() { return Err(format!("{path}: Is a directory")) }
                 },
             }
         }
@@ -69,7 +69,7 @@ impl<'a> OutputDevice<'a> {
                 Redirect::Append((fd, file)) => {
                     if *fd == to_fd {
                         let mut file = OpenOptions::new().write(true).append(true).open(file)?;
-                        write!(file, "{}", output)?;
+                        write!(file, "{output}")?;
                         is_redirected = true;
                     }
                 }
@@ -79,9 +79,9 @@ impl<'a> OutputDevice<'a> {
 
         if !is_redirected {
             if to_fd == STDOUT {
-                print!("{}", output);
+                print!("{output}");
             } else {
-                eprint!("{}", output);
+                eprint!("{output}");
             }
         }
 
@@ -168,13 +168,13 @@ impl OutputDevice {
         };
         match out_obj {
             OpenedFd::File{file, writable: true} => {
-                write!(file, "{}", output)?;
+                write!(file, "{output}")?;
             },
             OpenedFd::PipeWriter(pipe) => {
-                write!(pipe, "{}", output)?;
+                write!(pipe, "{output}")?;
             },
-            OpenedFd::StdOut => print!("{}", output),
-            OpenedFd::StdErr => eprint!("{}", output),
+            OpenedFd::StdOut => print!("{output}"),
+            OpenedFd::StdErr => eprint!("{output}"),
             _ => panic!("OutputDevice: received input object"),
         }
         Ok(())
