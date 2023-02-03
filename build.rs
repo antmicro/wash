@@ -11,19 +11,31 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         std::str::from_utf8(&hash)?
     );
     let date_commit = std::process::Command::new("git")
-        .args(["show", "--quiet", "--format=%cd", "--date", "format-local:%Y-%m-%d %H:%M:%S %z"])
+        .args([
+            "show",
+            "--quiet",
+            "--format=%cd",
+            "--date",
+            "format-local:%Y-%m-%d %H:%M:%S %z",
+        ])
         .env("TZ", "UTC0")
         .output()
         .expect("Failed getting commit date from git")
         .stdout;
-    println!("cargo:rustc-env=SHELL_COMMIT_DATE={}", std::str::from_utf8(&date_commit)?);
+    println!(
+        "cargo:rustc-env=SHELL_COMMIT_DATE={}",
+        std::str::from_utf8(&date_commit)?
+    );
     let date_compile = std::process::Command::new("date")
         .args(["+%Y-%m-%d %R:%S %z"])
         .env("TZ", "UTC0")
         .output()
         .expect("Failed getting compile date")
         .stdout;
-    println!("cargo:rustc-env=SHELL_COMPILE_DATE={}", std::str::from_utf8(&date_compile)?);
+    println!(
+        "cargo:rustc-env=SHELL_COMPILE_DATE={}",
+        std::str::from_utf8(&date_compile)?
+    );
     println!("cargo:rustc-env=SHELL_TARGET={}", std::env::var("TARGET")?);
 
     Ok(())

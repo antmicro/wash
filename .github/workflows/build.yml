@@ -26,6 +26,15 @@ jobs:
           cargo clippy --target wasm32-wasi --quiet 2>> ${CLIPPY_OUT}
           cat ${CLIPPY_OUT}
           if [ -s ${CLIPPY_OUT} ]; then
-            echo "There were cargo-clippy warnings. Please fix."
+            echo "There were cargo-clippy warnings. Please fix it."
+            exit 1
+          fi
+      - name: Run Rust formater
+        run: |
+          source $HOME/.cargo/env
+          cargo fmt
+          if [ -n "$(git status --porcelain --untracked-files='no')" ]; then
+            git status --porcelain --untracked-files="no"
+            echo "The rust sources are not formatted properly. Please fix it."
             exit 1
           fi

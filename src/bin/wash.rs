@@ -12,7 +12,7 @@ use std::os::raw::c_int;
 use std::path::PathBuf;
 use std::process;
 
-use clap::{Command, Arg};
+use clap::{Arg, Command};
 
 use wash::Shell;
 
@@ -32,12 +32,16 @@ fn is_fd_tty(fd: i32) -> Result<bool, i32> {
 
 fn main() {
     let name = {
-        let mut path = PathBuf::from(env::args().next()
-            .unwrap_or_else(|| env!("CARGO_PKG_NAME").to_string()));
+        let mut path = PathBuf::from(
+            env::args()
+                .next()
+                .unwrap_or_else(|| env!("CARGO_PKG_NAME").to_string()),
+        );
         path.set_extension("");
         path.file_name().unwrap().to_str().unwrap().to_string()
     };
-    let version_short = &*format!("{}-{} ({})\nCopyright (c) 2021-{} Antmicro <www.antmicro.com>",
+    let version_short = &*format!(
+        "{}-{} ({})\nCopyright (c) 2021-{} Antmicro <www.antmicro.com>",
         env!("CARGO_PKG_VERSION"),
         env!("SHELL_COMMIT_HASH"),
         env!("SHELL_TARGET"),
@@ -56,9 +60,15 @@ fn main() {
             "{before-help}{bin} {version}\n\
             {about-with-newline}\n\
             {usage-heading}\n\t{usage}\n\
-            {all-args}{after-help}")
+            {all-args}{after-help}",
+        )
         // FILE - first value is the script path, other values are CLI args
-        .arg(Arg::new("FILE").help("Execute commands from file").multiple_values(true).index(1))
+        .arg(
+            Arg::new("FILE")
+                .help("Execute commands from file")
+                .multiple_values(true)
+                .index(1),
+        )
         .arg(
             Arg::new("command")
                 .help("Execute provided command")
@@ -72,19 +82,23 @@ fn main() {
     let pwd;
     let should_echo;
 
-    #[cfg(target_os = "wasi")] {
-        let _ = wasi_ext_lib::chdir(
-            match wasi_ext_lib::getcwd() {
-                Ok(p) => { pwd = p; &pwd },
-                Err(e) => {
-                    eprintln!("Could not obtain current working dir path (error {e})");
-                    pwd = String::from("/");
-                    &pwd
-                }
-            });
+    #[cfg(target_os = "wasi")]
+    {
+        let _ = wasi_ext_lib::chdir(match wasi_ext_lib::getcwd() {
+            Ok(p) => {
+                pwd = p;
+                &pwd
+            }
+            Err(e) => {
+                eprintln!("Could not obtain current working dir path (error {e})");
+                pwd = String::from("/");
+                &pwd
+            }
+        });
         should_echo = true;
     }
-    #[cfg(not(target_os = "wasi"))] {
+    #[cfg(not(target_os = "wasi"))]
+    {
         if let Ok(cwd) = env::current_dir() {
             pwd = cwd.display().to_string();
         } else {
@@ -107,14 +121,14 @@ fn main() {
         &pwd,
         if let Some(args) = matches.values_of("FILE") {
             len = args.len();
-            let collected = args.map(|s| { String::from(s) }).collect::<VecDeque<String>>();
+            let collected = args.map(String::from).collect::<VecDeque<String>>();
             script = collected[0].clone();
             collected
         } else {
             len = 0;
             script = String::from("");
             VecDeque::new()
-        }
+        },
     );
 
     let result = if let Some(command) = matches.value_of("command") {

@@ -199,7 +199,7 @@ fn handle_compound_command(
             }
             exit_status
         }
-        ast::CompoundCommandKind::For{ var, words, body } => {
+        ast::CompoundCommandKind::For { var, words, body } => {
             let mut exit_status = EXIT_SUCCESS;
             if let Some(w) = words {
                 for word in w {
@@ -210,8 +210,11 @@ fn handle_compound_command(
                 }
             }
             exit_status
-        },
-        ast::CompoundCommandKind::If{ conditionals, else_branch } => {
+        }
+        ast::CompoundCommandKind::If {
+            conditionals,
+            else_branch,
+        } => {
             let mut exit_status = EXIT_SUCCESS;
             let mut guard_exit = EXIT_FAILURE;
             for guard_body in conditionals {
@@ -226,20 +229,30 @@ fn handle_compound_command(
                 }
             }
             if guard_exit != EXIT_SUCCESS {
-                if let Some(els) = else_branch { for command in els {
-                    exit_status = handle_top_level_command(shell, command);
+                if let Some(els) = else_branch {
+                    for command in els {
+                        exit_status = handle_top_level_command(shell, command);
+                    }
                 }
-            }};
+            };
             exit_status
-        },
+        }
         ast::CompoundCommandKind::While(guard_body) => {
             let mut exit_status = EXIT_SUCCESS;
-            while guard_body.guard.iter().fold(EXIT_SUCCESS, |_, x| { handle_top_level_command(shell, x) }) == EXIT_SUCCESS {
-                exit_status = guard_body.body.iter().fold(EXIT_SUCCESS, |_, x| { handle_top_level_command(shell, x) })
+            while guard_body
+                .guard
+                .iter()
+                .fold(EXIT_SUCCESS, |_, x| handle_top_level_command(shell, x))
+                == EXIT_SUCCESS
+            {
+                exit_status = guard_body
+                    .body
+                    .iter()
+                    .fold(EXIT_SUCCESS, |_, x| handle_top_level_command(shell, x))
             }
             exit_status
         }
-        ast::CompoundCommandKind::Case{ word, arms } => {
+        ast::CompoundCommandKind::Case { word, arms } => {
             let mut exit_status = EXIT_SUCCESS;
             if let Some(handled_word) = handle_top_level_word(shell, word) {
                 for arm in arms {
@@ -254,12 +267,14 @@ fn handle_compound_command(
                                 // e.g. '[a*' won't match with [abbb
                                 handled_pattern == handled_word
                             }
-                        } else { false }
+                        } else {
+                            false
+                        }
                     }) {
-                        exit_status = arm.body.iter().fold(
-                            EXIT_SUCCESS,
-                            |_, x| { handle_top_level_command(shell, x) }
-                        );
+                        exit_status = arm
+                            .body
+                            .iter()
+                            .fold(EXIT_SUCCESS, |_, x| handle_top_level_command(shell, x));
                         break;
                     }
                 }
@@ -307,25 +322,32 @@ fn handle_simple_command(
             }
             ast::RedirectOrCmdWord::CmdWord(cmd_word) => {
                 if let Some(arg) = handle_top_level_word(shell, &cmd_word.0) {
-                    if let Ok(paths) = glob::glob_with(&arg, glob::MatchOptions {
-                        case_sensitive: true,
-                        require_literal_leading_dot: true,
-                        require_literal_separator: true,
-                    }) {
-                        let mut globbed = paths.map(|s| {
-                            if arg.starts_with("./") {
-                                // glob crate strips ./ prefix, if it is a bug, maybe we could fix it and submit a PR
-                                format!("./{}", s.unwrap().display())
-                            } else {
-                                s.unwrap().into_os_string().into_string().unwrap()
-                            }
-                        }).peekable();
+                    if let Ok(paths) = glob::glob_with(
+                        &arg,
+                        glob::MatchOptions {
+                            case_sensitive: true,
+                            require_literal_leading_dot: true,
+                            require_literal_separator: true,
+                        },
+                    ) {
+                        let mut globbed = paths
+                            .map(|s| {
+                                if arg.starts_with("./") {
+                                    // glob crate strips ./ prefix, if it is a bug, maybe we could fix it and submit a PR
+                                    format!("./{}", s.unwrap().display())
+                                } else {
+                                    s.unwrap().into_os_string().into_string().unwrap()
+                                }
+                            })
+                            .peekable();
                         if globbed.peek().is_none() {
                             args.push(arg);
                         } else {
                             args.extend(globbed);
                         }
-                    } else { args.push(arg); }
+                    } else {
+                        args.push(arg);
+                    }
                 }
             }
         }
@@ -381,7 +403,7 @@ fn handle_redirect_type(
             } else {
                 None
             }
-        },
+        }
         ast::Redirect::Append(file_descriptor, top_level_word) => {
             let file_descriptor = file_descriptor.unwrap_or(STDOUT);
             if let Some(mut filename) = handle_top_level_word(shell, top_level_word) {
@@ -392,7 +414,7 @@ fn handle_redirect_type(
             } else {
                 None
             }
-        },
+        }
         ast::Redirect::Read(file_descriptor, top_level_word) => {
             let file_descriptor = file_descriptor.unwrap_or(STDIN);
             if let Some(mut filename) = handle_top_level_word(shell, top_level_word) {
@@ -403,7 +425,7 @@ fn handle_redirect_type(
             } else {
                 None
             }
-        },
+        }
         #[cfg(not(target_os = "wasi"))]
         ast::Redirect::ReadWrite(file_descriptor, top_level_word) => {
             let file_descriptor = file_descriptor.unwrap_or(STDIN);
@@ -413,7 +435,7 @@ fn handle_redirect_type(
             } else {
                 None
             }
-        },
+        }
         #[cfg(not(target_os = "wasi"))]
         ast::Redirect::Clobber(file_descriptor, top_level_word) => {
             let file_descriptor = file_descriptor.unwrap_or(STDOUT);
@@ -423,46 +445,54 @@ fn handle_redirect_type(
             } else {
                 None
             }
-        },
+        }
         #[cfg(not(target_os = "wasi"))]
         ast::Redirect::DupRead(file_descriptor, top_level_word) => {
             let fd_dest = file_descriptor.unwrap_or(STDIN);
             if let Some(fd) = handle_top_level_word(shell, top_level_word) {
                 match fd.as_str() {
                     "-" => Some(Redirect::Close(fd_dest as RawFd)),
-                    fd => if let Ok(fd_source) = fd.parse::<u16>() {
-                        Some(Redirect::Duplicate((fd_dest as RawFd, fd_source as RawFd)))
-                    } else {
-                        eprintln!("DupRead redirect top_level_word not parsed: {top_level_word:?}");
-                        None
+                    fd => {
+                        if let Ok(fd_source) = fd.parse::<u16>() {
+                            Some(Redirect::Duplicate((fd_dest as RawFd, fd_source as RawFd)))
+                        } else {
+                            eprintln!(
+                                "DupRead redirect top_level_word not parsed: {top_level_word:?}"
+                            );
+                            None
+                        }
                     }
                 }
             } else {
                 None
             }
-        },
+        }
         #[cfg(not(target_os = "wasi"))]
         ast::Redirect::DupWrite(file_descriptor, top_level_word) => {
             let fd_dest = file_descriptor.unwrap_or(STDOUT);
             if let Some(fd) = handle_top_level_word(shell, top_level_word) {
                 match fd.as_str() {
                     "-" => Some(Redirect::Close(fd_dest as RawFd)),
-                    fd => if let Ok(fd_source) = fd.parse::<u16>() {
-                        Some(Redirect::Duplicate((fd_dest as RawFd, fd_source as RawFd)))
-                    } else {
-                        eprintln!("DupWrite redirect top_level_word not parsed: {top_level_word:?}");
-                        None
+                    fd => {
+                        if let Ok(fd_source) = fd.parse::<u16>() {
+                            Some(Redirect::Duplicate((fd_dest as RawFd, fd_source as RawFd)))
+                        } else {
+                            eprintln!(
+                                "DupWrite redirect top_level_word not parsed: {top_level_word:?}"
+                            );
+                            None
+                        }
                     }
                 }
             } else {
                 None
             }
-        },
+        }
         // TODO: Heredoc (multiline command parsing) implementation
         any => {
             eprintln!("Redirect not yet handled: {any:?}");
             None
-        },
+        }
     }
 }
 
@@ -517,27 +547,43 @@ fn handle_simple_word<'a>(shell: &'a Shell, word: &'a ast::DefaultSimpleWord) ->
                     Some(process::id().to_string())
                 }
                 #[cfg(target_os = "wasi")]
-                Some(
-                    wasi_ext_lib::getpid().unwrap().to_string()
-                )
+                Some(wasi_ext_lib::getpid().unwrap().to_string())
             }
             ast::Parameter::At => {
                 if !shell.args.is_empty() {
-                    Some(shell.args.range(1..).cloned().collect::<Vec<String>>().join(" "))
-                } else { Some(String::from(" ")) }
-            },
-            ast::Parameter::Pound => {
-                Some(format!("{}", if !shell.args.is_empty() {
+                    Some(
+                        shell
+                            .args
+                            .range(1..)
+                            .cloned()
+                            .collect::<Vec<String>>()
+                            .join(" "),
+                    )
+                } else {
+                    Some(String::from(" "))
+                }
+            }
+            ast::Parameter::Pound => Some(format!(
+                "{}",
+                if !shell.args.is_empty() {
                     shell.args.len() - 1
-                } else { 0 }))
-            },
-            ast::Parameter::Positional(n) => { Some(String::from(if let Some(a) = &shell.args.get(*n as usize) { a } else { "" })) }
+                } else {
+                    0
+                }
+            )),
+            ast::Parameter::Positional(n) => Some(String::from(
+                if let Some(a) = &shell.args.get(*n as usize) {
+                    a
+                } else {
+                    ""
+                },
+            )),
             any => Some(format!("parameter not yet handled: {any:?}")),
         },
-        ast::SimpleWord::Star => { Some("*".to_string()) }
-        ast::SimpleWord::Question => { Some("?".to_string()) }
-        ast::SimpleWord::SquareOpen => { Some("[".to_string()) }
-        ast::SimpleWord::SquareClose => { Some("]".to_string()) }
+        ast::SimpleWord::Star => Some("*".to_string()),
+        ast::SimpleWord::Question => Some("?".to_string()),
+        ast::SimpleWord::SquareOpen => Some("[".to_string()),
+        ast::SimpleWord::SquareClose => Some("]".to_string()),
         any => Some(format!("simple word not yet handled: {any:?}")),
     }
 }

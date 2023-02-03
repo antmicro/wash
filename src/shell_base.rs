@@ -33,10 +33,9 @@ use libc;
 use os_pipe::{PipeReader, PipeWriter};
 use regex::Regex;
 
-
+use crate::internals::INTERNALS_MAP;
 use crate::interpreter::interpret;
 use crate::output_device::OutputDevice;
-use crate::internals::INTERNALS_MAP;
 
 type Fd = u16;
 type SerializedPath = String;
@@ -70,7 +69,7 @@ fn as_ext_redirect(r: &Redirect) -> wasi_ext_lib::Redirect {
     match r {
         Redirect::Read((fd, path)) => wasi_ext_lib::Redirect::Read((*fd as u32, path)),
         Redirect::Write((fd, path)) => wasi_ext_lib::Redirect::Write((*fd as u32, path)),
-        Redirect::Append((fd, path)) => wasi_ext_lib::Redirect::Append((*fd as u32, path))
+        Redirect::Append((fd, path)) => wasi_ext_lib::Redirect::Append((*fd as u32, path)),
     }
 }
 
@@ -90,7 +89,7 @@ pub enum Redirect {
 #[cfg(not(target_os = "wasi"))]
 #[derive(Debug)]
 pub enum OpenedFd {
-    File{file: File, writable: bool},
+    File { file: File, writable: bool },
     PipeReader(PipeReader),
     PipeWriter(PipeWriter),
     StdIn,
@@ -103,27 +102,33 @@ pub fn spawn(
     args: &[&str],
     env: &HashMap<String, String>,
     background: bool,
-    redirects: &[Redirect]
+    redirects: &[Redirect],
 ) -> Result<i32, i32> {
-    #[cfg(target_os = "wasi")] {
+    #[cfg(target_os = "wasi")]
+    {
         wasi_ext_lib::spawn(
-            path, args, env, background,
-            redirects.iter().map(as_ext_redirect).collect())
+            path,
+            args,
+            env,
+            background,
+            redirects.iter().map(as_ext_redirect).collect(),
+        )
     }
     #[cfg(not(target_os = "wasi"))]
     return Ok({
-        let mut std_fds = HashSet::from(
-            [STDIN as RawFd, STDOUT as RawFd, STDERR as RawFd]
-        );
+        let mut std_fds = HashSet::from([STDIN as RawFd, STDOUT as RawFd, STDERR as RawFd]);
         let mut child = std::process::Command::new(path);
-        child.args(args)
-            .envs(env);
+        child.args(args).envs(env);
 
-        let fd_mappings = redirects.iter()
+        let fd_mappings = redirects
+            .iter()
             .map(|red| {
                 if let Redirect::Duplicate((child_fd, parent_fd)) = *red {
                     std_fds.remove(&child_fd);
-                    FdMapping{ parent_fd, child_fd }
+                    FdMapping {
+                        parent_fd,
+                        child_fd,
+                    }
                 } else {
                     panic!("Not allowed redirection subtype in syscall: {:?}", red);
                 }
@@ -132,7 +137,9 @@ pub fn spawn(
 
         let fds_to_close = std_fds.into_iter().collect::<Vec<RawFd>>();
 
-        child.fd_mappings(fd_mappings).expect("Could not apply file descriptor mapping.");
+        child
+            .fd_mappings(fd_mappings)
+            .expect("Could not apply file descriptor mapping.");
 
         /*
         pre_exec is unsafe function, if user wants to close stdin/out/err
@@ -140,22 +147,22 @@ pub fn spawn(
         higher fd numbers we preprocess redirections and do not open fds
         that would be finally closed
         */
-        unsafe { child.pre_exec( move || {
-            for fd in fds_to_close.iter() {
-                libc::close(*fd);
-            }
-            Ok(())
-        });}
+        unsafe {
+            child.pre_exec(move || {
+                for fd in fds_to_close.iter() {
+                    libc::close(*fd);
+                }
+                Ok(())
+            });
+        }
 
-        let mut spawned = child.spawn()
-            .unwrap();
+        let mut spawned = child.spawn().unwrap();
 
         if !background {
             spawned.wait().unwrap().code().unwrap()
         } else {
             EXIT_SUCCESS
         }
-
     });
 }
 
@@ -170,9 +177,7 @@ pub fn path_exists(path: &str) -> io::Result<bool> {
 }
 
 #[cfg(not(target_os = "wasi"))]
-fn preprocess_redirects(redirects: &mut [Redirect]) -> (
-    HashMap<RawFd, OpenedFd>, io::Result<()>
-) {
+fn preprocess_redirects(redirects: &mut [Redirect]) -> (HashMap<RawFd, OpenedFd>, io::Result<()>) {
     let mut fd_redirects = HashMap::from([
         (STDIN as RawFd, OpenedFd::StdIn),
         (STDOUT as RawFd, OpenedFd::StdOut),
@@ -183,15 +188,13 @@ fn preprocess_redirects(redirects: &mut [Redirect]) -> (
     for redirect in redirects.iter_mut() {
         match redirect {
             Redirect::PipeIn(pipe) => {
-                let pipe = pipe.take()
-                    .expect("Empty pipeline redirection");
+                let pipe = pipe.take().expect("Empty pipeline redirection");
                 fd_redirects.insert(STDIN as RawFd, OpenedFd::PipeReader(pipe));
-            },
+            }
             Redirect::PipeOut(pipe) => {
-                let pipe = pipe.take()
-                    .expect("Empty pipeline redirection");
+                let pipe = pipe.take().expect("Empty pipeline redirection");
                 fd_redirects.insert(STDOUT as RawFd, OpenedFd::PipeWriter(pipe));
-            },
+            }
             _ => {}
         }
     }
@@ -199,16 +202,20 @@ fn preprocess_redirects(redirects: &mut [Redirect]) -> (
     for redirect in redirects.iter_mut() {
         match redirect {
             Redirect::Read((fd, path)) => {
-                let file = OpenOptions::new()
-                    .read(true)
-                    .open(path);
+                let file = OpenOptions::new().read(true).open(path);
                 if let Ok(file) = file {
                     let fd = *fd;
-                    fd_redirects.insert(fd, OpenedFd::File{ file, writable: false });
+                    fd_redirects.insert(
+                        fd,
+                        OpenedFd::File {
+                            file,
+                            writable: false,
+                        },
+                    );
                 } else if let Err(e) = file {
                     return (fd_redirects, Err(e));
                 }
-            },
+            }
             Redirect::Write((fd, path)) => {
                 let file = OpenOptions::new()
                     .write(true)
@@ -217,11 +224,17 @@ fn preprocess_redirects(redirects: &mut [Redirect]) -> (
                     .open(path);
                 if let Ok(file) = file {
                     let fd = *fd;
-                    fd_redirects.insert(fd, OpenedFd::File{ file, writable: true });
+                    fd_redirects.insert(
+                        fd,
+                        OpenedFd::File {
+                            file,
+                            writable: true,
+                        },
+                    );
                 } else if let Err(e) = file {
                     return (fd_redirects, Err(e));
                 }
-            },
+            }
             Redirect::Append((fd, path)) => {
                 let file = OpenOptions::new()
                     .write(true)
@@ -230,11 +243,17 @@ fn preprocess_redirects(redirects: &mut [Redirect]) -> (
                     .open(path);
                 if let Ok(file) = file {
                     let fd = *fd;
-                    fd_redirects.insert(fd, OpenedFd::File{ file, writable: true });
+                    fd_redirects.insert(
+                        fd,
+                        OpenedFd::File {
+                            file,
+                            writable: true,
+                        },
+                    );
                 } else if let Err(e) = file {
                     return (fd_redirects, Err(e));
                 }
-            },
+            }
             Redirect::ReadWrite((fd, path)) => {
                 let file = OpenOptions::new()
                     .read(true)
@@ -243,75 +262,60 @@ fn preprocess_redirects(redirects: &mut [Redirect]) -> (
                     .open(path);
                 if let Ok(file) = file {
                     let fd = *fd;
-                    fd_redirects.insert(fd, OpenedFd::File{ file, writable: true });
+                    fd_redirects.insert(
+                        fd,
+                        OpenedFd::File {
+                            file,
+                            writable: true,
+                        },
+                    );
                 } else if let Err(e) = file {
                     return (fd_redirects, Err(e));
                 }
-            },
+            }
             Redirect::Duplicate((fd_dest, fd_source)) => {
                 if let Some(dest) = fd_redirects.get(&(*fd_source)) {
                     match dest {
-                        OpenedFd::File{ file, writable } => {
+                        OpenedFd::File { file, writable } => {
                             let file = match file.try_clone() {
                                 Ok(file) => file,
                                 Err(e) => return (fd_redirects, Err(e)),
                             };
                             let writable = *writable;
-                            fd_redirects.insert(
-                                *fd_dest,
-                                OpenedFd::File{file, writable}
-                            );
-                        },
+                            fd_redirects.insert(*fd_dest, OpenedFd::File { file, writable });
+                        }
                         OpenedFd::PipeReader(pipe) => {
                             let pipe = match pipe.try_clone() {
                                 Ok(pipe) => pipe,
                                 Err(e) => return (fd_redirects, Err(e)),
                             };
-                            fd_redirects.insert(
-                                *fd_dest,
-                                OpenedFd::PipeReader(pipe)
-                            );
-                        },
+                            fd_redirects.insert(*fd_dest, OpenedFd::PipeReader(pipe));
+                        }
                         OpenedFd::PipeWriter(pipe) => {
                             let pipe = match pipe.try_clone() {
                                 Ok(pipe) => pipe,
                                 Err(e) => return (fd_redirects, Err(e)),
                             };
-                            fd_redirects.insert(
-                                *fd_dest,
-                                OpenedFd::PipeWriter(pipe)
-                            );
-                        },
+                            fd_redirects.insert(*fd_dest, OpenedFd::PipeWriter(pipe));
+                        }
                         OpenedFd::StdIn => {
-                            fd_redirects.insert(
-                                *fd_dest,
-                                OpenedFd::StdIn
-                            );
-                        },
+                            fd_redirects.insert(*fd_dest, OpenedFd::StdIn);
+                        }
                         OpenedFd::StdOut => {
-                            fd_redirects.insert(
-                                *fd_dest,
-                                OpenedFd::StdOut
-                            );
-                        },
+                            fd_redirects.insert(*fd_dest, OpenedFd::StdOut);
+                        }
                         OpenedFd::StdErr => {
-                            fd_redirects.insert(
-                                *fd_dest,
-                                OpenedFd::StdErr
-                            );
-                        },
+                            fd_redirects.insert(*fd_dest, OpenedFd::StdErr);
+                        }
                     }
                 } else {
-                    return (
-                        fd_redirects,
-                        Err(io::Error::from_raw_os_error(libc::EBADF))
-                    );
+                    return (fd_redirects, Err(io::Error::from_raw_os_error(libc::EBADF)));
                 }
-            },
+            }
             Redirect::Close(fd) => {
                 fd_redirects.remove(&*fd);
-            },
-            Redirect::PipeIn(_) |  Redirect::PipeOut(_) => continue,
+            }
+            Redirect::PipeIn(_) | Redirect::PipeOut(_) => continue,
         }
     }
 
@@ -328,7 +332,7 @@ pub struct Shell {
     history_path: PathBuf,
     should_echo: bool,
     cursor_position: usize,
-    insert_mode: bool
+    insert_mode: bool,
 }
 
 impl Shell {
@@ -338,16 +342,23 @@ impl Shell {
             pwd: PathBuf::from(pwd),
             args,
             history: Vec::new(),
-            history_path: PathBuf::from(
-                if PathBuf::from(env::var("HOME").unwrap()).exists() {
-                    format!("{}/.{}_history", env::var("HOME").unwrap(), env!("CARGO_PKG_NAME"))
-                } else {
-                    format!("{}/.{}_history", env::var("PWD").unwrap(), env!("CARGO_PKG_NAME"))
-                }),
+            history_path: PathBuf::from(if PathBuf::from(env::var("HOME").unwrap()).exists() {
+                format!(
+                    "{}/.{}_history",
+                    env::var("HOME").unwrap(),
+                    env!("CARGO_PKG_NAME")
+                )
+            } else {
+                format!(
+                    "{}/.{}_history",
+                    env::var("PWD").unwrap(),
+                    env!("CARGO_PKG_NAME")
+                )
+            }),
             vars: HashMap::new(),
             last_exit_status: EXIT_SUCCESS,
             cursor_position: 0,
-            insert_mode: false
+            insert_mode: false,
         }
     }
 
@@ -394,13 +405,8 @@ impl Shell {
         self.handle_input(&fs::read_to_string(script_name.into()).unwrap())
     }
 
-    fn get_cursor_to_end(&mut self, input: &String){
-        self.echo(
-            &input
-                .chars()
-                .skip(self.cursor_position)
-                .collect::<String>(),
-        );
+    fn get_cursor_to_end(&mut self, input: &String) {
+        self.echo(&input.chars().skip(self.cursor_position).collect::<String>());
         for _ in 0..input.len() {
             self.echo(&format!("{} {}", 8 as char, 8 as char));
         }
@@ -438,7 +444,8 @@ impl Shell {
                                 match [c2[0], c3[0]] {
                                     // PageUp
                                     [0x35, 0x7e] => {
-                                        if !self.history.is_empty() && history_entry_to_display != 0 {
+                                        if !self.history.is_empty() && history_entry_to_display != 0
+                                        {
                                             if history_entry_to_display == -1 {
                                                 input_stash = input.clone();
                                             }
@@ -446,8 +453,7 @@ impl Shell {
                                             // bring cursor to the end so that clearing later starts from
                                             // proper position
                                             self.get_cursor_to_end(input);
-                                            *input =
-                                                self.history[0].clone();
+                                            *input = self.history[0].clone();
                                             self.cursor_position = input.len();
                                             self.echo(input);
                                         }
@@ -470,7 +476,8 @@ impl Shell {
                                     [0x32, 0x7e] => {
                                         self.insert_mode = !self.insert_mode;
                                         #[cfg(target_os = "wasi")]
-                                        let _ = wasi_ext_lib::hterm("cursor-shape", Some("UNDERLINE"));
+                                        let _ =
+                                            wasi_ext_lib::hterm("cursor-shape", Some("UNDERLINE"));
                                         escaped = false;
                                     }
                                     // delete key
@@ -506,10 +513,7 @@ impl Shell {
                                         escaped = false;
                                     }
                                     _ => {
-                                        println!(
-                                            "TODO: [ + 0x{:02x} + 0x{:02x}",
-                                            c2[0], c3[0]
-                                        );
+                                        println!("TODO: [ + 0x{:02x} + 0x{:02x}", c2[0], c3[0]);
                                         escaped = false;
                                     }
                                 }
@@ -645,13 +649,14 @@ impl Shell {
                         } else {
                             // in insert mode, when cursor is in the middle, chars are replaced
                             // instead of being put in the middle while moving next characters further
-                            if self.cursor_position != input.len(){
+                            if self.cursor_position != input.len() {
                                 input.replace_range(
-                                    self.cursor_position..self.cursor_position+1,
-                                    std::str::from_utf8(&[c1[0]]).unwrap());
+                                    self.cursor_position..self.cursor_position + 1,
+                                    std::str::from_utf8(&[c1[0]]).unwrap(),
+                                );
                             } else {
                                 // if cursor is at the end, chars are input regularly
-                                input.push(c1[0] as char );
+                                input.push(c1[0] as char);
                             }
                         }
                         // echo
@@ -739,14 +744,14 @@ impl Shell {
             let _ = wasi_ext_lib::set_echo(true);
         }
 
-        #[cfg(target_os = "wasi")] {
+        #[cfg(target_os = "wasi")]
+        {
             // TODO: see https://github.com/WebAssembly/wasi-filesystem/issues/24
-            _ = wasi_ext_lib::chdir(
-                &if let Ok(p) = wasi_ext_lib::getcwd() {
-                    p
-                } else {
-                    String::from("/")
-                });
+            _ = wasi_ext_lib::chdir(&if let Ok(p) = wasi_ext_lib::getcwd() {
+                p
+            } else {
+                String::from("/")
+            });
         }
 
         if PathBuf::from(&self.history_path).exists() {
@@ -756,11 +761,14 @@ impl Shell {
                 .map(str::to_string)
                 .collect();
         }
-        
 
         let washrc_path = {
             if PathBuf::from(env::var("HOME").unwrap()).exists() {
-                format!("{}/.{}rc", env::var("HOME").unwrap(), env!("CARGO_PKG_NAME"))
+                format!(
+                    "{}/.{}rc",
+                    env::var("HOME").unwrap(),
+                    env!("CARGO_PKG_NAME")
+                )
             } else {
                 format!("{}/.{}rc", env::var("PWD").unwrap(), env!("CARGO_PKG_NAME"))
             }
@@ -809,7 +817,11 @@ impl Shell {
                     }
                 }
                 Err(error) => {
-                    eprintln!("Unable to open file for storing {} history: {}", env!("CARGO_PKG_NAME"), error);
+                    eprintln!(
+                        "Unable to open file for storing {} history: {}",
+                        env!("CARGO_PKG_NAME"),
+                        error
+                    );
                 }
             };
             input.clear();
@@ -833,29 +845,20 @@ impl Shell {
                         ParseError::BadFd(pos_start, pos_end) => {
                             let idx_start = pos_start.byte;
                             let idx_end = pos_end.byte;
-                            format!("{}: ambiguous redirect", input[idx_start..idx_end].to_owned())
-                        },
-                        ParseError::BadIdent(_, _) => {
-                            "bad idenftifier".to_string()
-                        },
-                        ParseError::BadSubst(_, _) => {
-                            "bad substitution".to_string()
-                        },
-                        ParseError::Unmatched(_, _) => {
-                            "unmached expression".to_string()
-                        },
-                        ParseError::IncompleteCmd(_, _, _, _) => {
-                            "incomplete command".to_string()
-                        },
-                        ParseError::Unexpected(_, _) => {
-                            "unexpected token".to_string()
-                        },
-                        ParseError::UnexpectedEOF => {
-                            "unexpected end of file".to_string()
-                        },
+                            format!(
+                                "{}: ambiguous redirect",
+                                input[idx_start..idx_end].to_owned()
+                            )
+                        }
+                        ParseError::BadIdent(_, _) => "bad idenftifier".to_string(),
+                        ParseError::BadSubst(_, _) => "bad substitution".to_string(),
+                        ParseError::Unmatched(_, _) => "unmached expression".to_string(),
+                        ParseError::IncompleteCmd(_, _, _, _) => "incomplete command".to_string(),
+                        ParseError::Unexpected(_, _) => "unexpected token".to_string(),
+                        ParseError::UnexpectedEOF => "unexpected end of file".to_string(),
                         ParseError::Custom(t) => {
                             format!("custom AST error: {t:?}")
-                        },
+                        }
                     };
                     eprintln!("{}: {}", env!("CARGO_PKG_NAME"), err_msg);
                     self.last_exit_status = EXIT_FAILURE;
@@ -876,12 +879,12 @@ impl Shell {
         redirects: &mut [Redirect],
     ) -> Result<i32, Report> {
         #[cfg(target_os = "wasi")]
-        let mut output_device =  match OutputDevice::new(redirects) {
+        let mut output_device = match OutputDevice::new(redirects) {
             Ok(o) => o,
             Err(s) => {
                 eprintln!("{}: {}", env!("CARGO_PKG_NAME"), s);
-                return Ok(EXIT_FAILURE)
-           }
+                return Ok(EXIT_FAILURE);
+            }
         };
 
         #[cfg(not(target_os = "wasi"))]
@@ -906,35 +909,30 @@ impl Shell {
                 return Ok(EXIT_FAILURE);
             }
 
-            let redirects = opened_fds.iter().map( |(fd_child, target)| {
-                match target {
+            let redirects = opened_fds
+                .iter()
+                .map(|(fd_child, target)| match target {
                     OpenedFd::File { file, writable: _ } => {
                         Redirect::Duplicate((*fd_child, file.as_raw_fd()))
-                    },
+                    }
                     OpenedFd::PipeReader(pipe) => {
                         Redirect::Duplicate((*fd_child, pipe.as_raw_fd()))
-                    },
+                    }
                     OpenedFd::PipeWriter(pipe) => {
                         Redirect::Duplicate((*fd_child, pipe.as_raw_fd()))
-                    },
-                    OpenedFd::StdIn => {
-                        Redirect::Duplicate((*fd_child, STDIN as RawFd))
-                    },
-                    OpenedFd::StdOut => {
-                        Redirect::Duplicate((*fd_child, STDOUT as RawFd))
-                    },
-                    OpenedFd::StdErr => {
-                        Redirect::Duplicate((*fd_child, STDERR as RawFd))
                     }
-                }
-            }).collect::<Vec<Redirect>>();
+                    OpenedFd::StdIn => Redirect::Duplicate((*fd_child, STDIN as RawFd)),
+                    OpenedFd::StdOut => Redirect::Duplicate((*fd_child, STDOUT as RawFd)),
+                    OpenedFd::StdErr => Redirect::Duplicate((*fd_child, STDERR as RawFd)),
+                })
+                .collect::<Vec<Redirect>>();
 
             (redirects, opened_fds, output_device)
         };
         #[cfg(not(target_os = "wasi"))]
         let redirects = &redirects;
 
-        let result: Result<i32, Report> =  if let Some(internal) = INTERNALS_MAP.get(command) {
+        let result: Result<i32, Report> = if let Some(internal) = INTERNALS_MAP.get(command) {
             internal(self, args, &mut output_device)
         } else {
             let full_path = if command.starts_with('/') {
@@ -1000,12 +998,14 @@ impl Shell {
                         match spawn(args_[0], &args_[1..], env, background, redirects) {
                             // nonempty output message means that binary couldn't be executed
                             Err(e) => {
-                                output_device.eprintln(
-                                    &format!(
-                                    "{}: could not execute binary (os error {})", env!("CARGO_PKG_NAME"), e));
+                                output_device.eprintln(&format!(
+                                    "{}: could not execute binary (os error {})",
+                                    env!("CARGO_PKG_NAME"),
+                                    e
+                                ));
                                 Ok(EXIT_FAILURE)
                             }
-                            Ok(e) => Ok(e)
+                            Ok(e) => Ok(e),
                         }
                     }
                 }
