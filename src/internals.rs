@@ -4,27 +4,35 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+use std::collections::HashMap;
 use std::env;
 use std::fs;
 use std::path::PathBuf;
-use std::collections::HashMap;
 
 use color_eyre::Report;
 use lazy_static::lazy_static;
 
-use crate::shell_base::Shell;
 use crate::output_device::OutputDevice;
-use crate::shell_base::{EXIT_SUCCESS, EXIT_FAILURE, CLEAR_ESCAPE_CODE};
 use crate::shell_base::path_exists;
+use crate::shell_base::Shell;
+use crate::shell_base::{CLEAR_ESCAPE_CODE, EXIT_FAILURE, EXIT_SUCCESS};
 
 type Internal = fn(&mut Shell, &mut [String], &mut OutputDevice) -> Result<i32, Report>;
 
-fn clear(_shell: &mut Shell, _args: &mut [String], output_device: &mut OutputDevice) -> Result<i32, Report> {
+fn clear(
+    _shell: &mut Shell,
+    _args: &mut [String],
+    output_device: &mut OutputDevice,
+) -> Result<i32, Report> {
     output_device.print(CLEAR_ESCAPE_CODE);
     Ok(EXIT_SUCCESS)
 }
 
-fn exit(_shell: &mut Shell, args: &mut [String], _output_device: &mut OutputDevice) -> Result<i32, Report> {
+fn exit(
+    _shell: &mut Shell,
+    args: &mut [String],
+    _output_device: &mut OutputDevice,
+) -> Result<i32, Report> {
     let exit_code: i32 = {
         if args.is_empty() {
             EXIT_SUCCESS
@@ -35,12 +43,20 @@ fn exit(_shell: &mut Shell, args: &mut [String], _output_device: &mut OutputDevi
     std::process::exit(exit_code);
 }
 
-fn pwd(_shell: &mut Shell, _args: &mut [String], output_device: &mut OutputDevice) -> Result<i32, Report> {
+fn pwd(
+    _shell: &mut Shell,
+    _args: &mut [String],
+    output_device: &mut OutputDevice,
+) -> Result<i32, Report> {
     output_device.println(&env::current_dir().unwrap().display().to_string());
     Ok(EXIT_SUCCESS)
 }
 
-fn cd(shell: &mut Shell, args: &mut [String], output_device: &mut OutputDevice) -> Result<i32, Report> {
+fn cd(
+    shell: &mut Shell,
+    args: &mut [String],
+    output_device: &mut OutputDevice,
+) -> Result<i32, Report> {
     let path = if args.is_empty() {
         PathBuf::from(env::var("HOME").unwrap())
     } else if args[0] == "-" {
@@ -67,10 +83,14 @@ fn cd(shell: &mut Shell, args: &mut [String], output_device: &mut OutputDevice) 
             // step fails
             #[cfg(target_os = "wasi")]
             {
-                wasi_ext_lib::set_env("OLDPWD", Some(env::current_dir().unwrap().to_str().unwrap())).unwrap();
+                wasi_ext_lib::set_env(
+                    "OLDPWD",
+                    Some(env::current_dir().unwrap().to_str().unwrap()),
+                )
+                .unwrap();
                 shell.pwd = fs::canonicalize(&path).unwrap();
-                wasi_ext_lib::set_env("PWD", Some(&shell.pwd.to_str().unwrap())).unwrap();
-                wasi_ext_lib::chdir(&shell.pwd.to_str().unwrap()).unwrap();
+                wasi_ext_lib::set_env("PWD", Some(shell.pwd.to_str().unwrap())).unwrap();
+                wasi_ext_lib::chdir(shell.pwd.to_str().unwrap()).unwrap();
             }
             #[cfg(not(target_os = "wasi"))]
             {
@@ -84,14 +104,22 @@ fn cd(shell: &mut Shell, args: &mut [String], output_device: &mut OutputDevice) 
     }
 }
 
-fn history(shell: &mut Shell, _args: &mut [String], output_device: &mut OutputDevice) -> Result<i32, Report> {
+fn history(
+    shell: &mut Shell,
+    _args: &mut [String],
+    output_device: &mut OutputDevice,
+) -> Result<i32, Report> {
     for (i, history_entry) in shell.history.iter().enumerate() {
         output_device.println(&format!("{}: {}", i + 1, history_entry));
     }
     Ok(EXIT_SUCCESS)
 }
 
-fn unset(shell: &mut Shell, args: &mut [String], output_device: &mut OutputDevice) -> Result<i32, Report> {
+fn unset(
+    shell: &mut Shell,
+    args: &mut [String],
+    output_device: &mut OutputDevice,
+) -> Result<i32, Report> {
     if args.is_empty() {
         output_device.eprintln("unset: help: unset <VAR> [<VAR>] ...");
         Ok(EXIT_FAILURE)
@@ -112,14 +140,18 @@ fn unset(shell: &mut Shell, args: &mut [String], output_device: &mut OutputDevic
     }
 }
 
-fn declare(shell: &mut Shell, args: &mut [String], output_device: &mut OutputDevice) -> Result<i32, Report> {
+fn declare(
+    shell: &mut Shell,
+    args: &mut [String],
+    output_device: &mut OutputDevice,
+) -> Result<i32, Report> {
     if args.is_empty() {
         // TODO: we should join and sort the variables!
         for (key, value) in shell.vars.iter() {
-            output_device.println(&format!("{}={}", key, value));
+            output_device.println(&format!("{key}={value}"));
         }
         for (key, value) in env::vars() {
-            output_device.println(&format!("{}={}", key, value));
+            output_device.println(&format!("{key}={value}"));
         }
     } else if args[0] == "-x" || args[0] == "+x" {
         // if -x is provided declare works as export
@@ -153,13 +185,16 @@ fn declare(shell: &mut Shell, args: &mut [String], output_device: &mut OutputDev
     Ok(EXIT_SUCCESS)
 }
 
-fn export(shell: &mut Shell, args: &mut [String], output_device: &mut OutputDevice) -> Result<i32, Report> {
+fn export(
+    shell: &mut Shell,
+    args: &mut [String],
+    output_device: &mut OutputDevice,
+) -> Result<i32, Report> {
     // export creates an env value if A=B notation is used,
     // or just copies a local var to env if "=" is not used.
     // Export on nonexisting local var exports empty variable.
     if args.is_empty() {
-        output_device
-            .eprintln("export: help: export <VAR>[=<VALUE>] [<VAR>[=<VALUE>]] ...");
+        output_device.eprintln("export: help: export <VAR>[=<VALUE>] [<VAR>[=<VALUE>]] ...");
         Ok(EXIT_FAILURE)
     } else {
         for arg in args {
@@ -168,24 +203,28 @@ fn export(shell: &mut Shell, args: &mut [String], output_device: &mut OutputDevi
                 #[cfg(not(target_os = "wasi"))]
                 env::set_var(key, value);
                 #[cfg(target_os = "wasi")]
-                wasi_ext_lib::set_env(&key, Some(&value)).unwrap();
+                wasi_ext_lib::set_env(key, Some(value)).unwrap();
             } else if let Some(value) = shell.vars.remove(arg) {
                 #[cfg(not(target_os = "wasi"))]
                 env::set_var(arg, value);
                 #[cfg(target_os = "wasi")]
-                wasi_ext_lib::set_env(&arg, Some(&value)).unwrap();
+                wasi_ext_lib::set_env(arg, Some(&value)).unwrap();
             } else {
                 #[cfg(not(target_os = "wasi"))]
                 env::set_var(arg, "");
                 #[cfg(target_os = "wasi")]
-                wasi_ext_lib::set_env(&arg, Some("")).unwrap();
+                wasi_ext_lib::set_env(arg, Some("")).unwrap();
             }
         }
         Ok(EXIT_SUCCESS)
     }
 }
 
-fn source(shell: &mut Shell, args: &mut [String], output_device: &mut OutputDevice) -> Result<i32, Report> {
+fn source(
+    shell: &mut Shell,
+    args: &mut [String],
+    output_device: &mut OutputDevice,
+) -> Result<i32, Report> {
     if let Some(filename) = args.get(0) {
         shell.run_script(filename).unwrap();
         Ok(EXIT_SUCCESS)
@@ -195,19 +234,22 @@ fn source(shell: &mut Shell, args: &mut [String], output_device: &mut OutputDevi
     }
 }
 
-fn write(_shell: &mut Shell, args: &mut [String], output_device: &mut OutputDevice) -> Result<i32, Report> {
+fn write(
+    _shell: &mut Shell,
+    args: &mut [String],
+    output_device: &mut OutputDevice,
+) -> Result<i32, Report> {
     if args.len() < 2 {
         output_device.eprintln("write: help: write <filename> <contents>");
         Ok(EXIT_FAILURE)
     } else {
         let filename = &args[1];
         let content = args.join(" ");
-        match fs::write(filename, &content) {
+        match fs::write(filename, content) {
             Ok(_) => Ok(EXIT_SUCCESS),
             Err(error) => {
                 output_device.eprintln(&format!(
-                    "write: failed to write to file '{}': {}",
-                    filename, error
+                    "write: failed to write to file '{filename}': {error}"
                 ));
                 Ok(EXIT_FAILURE)
             }
@@ -215,14 +257,18 @@ fn write(_shell: &mut Shell, args: &mut [String], output_device: &mut OutputDevi
     }
 }
 
-fn shift(shell: &mut Shell, args: &mut [String], output_device: &mut OutputDevice) -> Result<i32, Report> {
+fn shift(
+    shell: &mut Shell,
+    args: &mut [String],
+    output_device: &mut OutputDevice,
+) -> Result<i32, Report> {
     if args.len() > 1 {
         output_device.eprintln("shift: too many arguments");
         Ok(EXIT_FAILURE)
     } else if let Some(n) = &args.get(0) {
         if let Ok(m) = n.parse::<i32>() {
             if m < 0 {
-                output_device.eprintln(&format!("shift: {}: shift count out of range", m));
+                output_device.eprintln(&format!("shift: {m}: shift count out of range"));
                 Ok(EXIT_FAILURE)
             } else if m as usize <= shell.args.len() {
                 _ = shell.args.drain(0..m as usize);
@@ -231,7 +277,7 @@ fn shift(shell: &mut Shell, args: &mut [String], output_device: &mut OutputDevic
                 Ok(EXIT_FAILURE)
             }
         } else {
-            output_device.eprintln(&format!("shift: {}: numeric argument required", n));
+            output_device.eprintln(&format!("shift: {n}: numeric argument required"));
             Ok(EXIT_FAILURE)
         }
     } else {

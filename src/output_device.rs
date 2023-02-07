@@ -4,20 +4,20 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
- #[cfg(not(target_os = "wasi"))]
+#[cfg(not(target_os = "wasi"))]
+use crate::shell_base::{OpenedFd, STDERR, STDOUT};
+#[cfg(target_os = "wasi")]
+use crate::shell_base::{Redirect, STDERR, STDOUT};
+use color_eyre::Report;
+#[cfg(not(target_os = "wasi"))]
 use std::collections::HashMap;
 #[cfg(target_os = "wasi")]
-use std::fs::{OpenOptions, self};
+use std::fs::{self, OpenOptions};
 use std::io::Write;
 #[cfg(not(target_os = "wasi"))]
 use std::os::unix::prelude::RawFd;
 #[cfg(target_os = "wasi")]
 use std::path::Path;
-use color_eyre::Report;
-#[cfg(target_os = "wasi")]
-use crate::shell_base::{STDERR, STDOUT, Redirect};
-#[cfg(not(target_os = "wasi"))]
-use crate::shell_base::{STDERR, STDOUT, OpenedFd};
 
 /// Wrapper for stdout/stderr operations from shell builtins so that they are redirects-aware
 
@@ -33,9 +33,13 @@ impl<'a> OutputDevice<'a> {
     pub fn new(redirects: &'a [Redirect]) -> Result<Self, String> {
         for i in redirects.iter() {
             match i {
-                Redirect::Write((_, path)) | Redirect::Read((_, path)) | Redirect::Append((_, path)) =>{
-                    if Path::new(path).is_dir() { return Err(format!("{}: Is a directory", path)) }
-                },
+                Redirect::Write((_, path))
+                | Redirect::Read((_, path))
+                | Redirect::Append((_, path)) => {
+                    if Path::new(path).is_dir() {
+                        return Err(format!("{path}: Is a directory"));
+                    }
+                }
             }
         }
         Ok(OutputDevice {
@@ -69,7 +73,7 @@ impl<'a> OutputDevice<'a> {
                 Redirect::Append((fd, file)) => {
                     if *fd == to_fd {
                         let mut file = OpenOptions::new().write(true).append(true).open(file)?;
-                        write!(file, "{}", output)?;
+                        write!(file, "{output}")?;
                         is_redirected = true;
                     }
                 }
@@ -79,9 +83,9 @@ impl<'a> OutputDevice<'a> {
 
         if !is_redirected {
             if to_fd == STDOUT {
-                print!("{}", output);
+                print!("{output}");
             } else {
-                eprint!("{}", output);
+                eprint!("{output}");
             }
         }
 
@@ -117,25 +121,32 @@ pub struct OutputDevice {
 #[cfg(not(target_os = "wasi"))]
 impl OutputDevice {
     pub fn new(redirects: &HashMap<RawFd, OpenedFd>) -> Result<Self, String> {
-        let redirects = redirects.iter().filter_map(|(fd, obj)| {
-            match obj {
+        let redirects = redirects
+            .iter()
+            .filter_map(|(fd, obj)| match obj {
                 OpenedFd::StdIn | OpenedFd::PipeReader(_) => None,
-                OpenedFd::File{file, writable} => {
+                OpenedFd::File { file, writable } => {
                     if *writable {
                         let file = file.try_clone().unwrap();
-                        Some((*fd, OpenedFd::File { file, writable: true }))
+                        Some((
+                            *fd,
+                            OpenedFd::File {
+                                file,
+                                writable: true,
+                            },
+                        ))
                     } else {
                         None
                     }
-                },
+                }
                 OpenedFd::PipeWriter(pipe) => {
                     let pipe = pipe.try_clone().unwrap();
                     Some((*fd, OpenedFd::PipeWriter(pipe)))
-                },
+                }
                 OpenedFd::StdOut => Some((*fd, OpenedFd::StdOut)),
-                OpenedFd::StdErr => Some((*fd, OpenedFd::StdErr))
-            }
-        }).collect::<HashMap<RawFd, OpenedFd>>();
+                OpenedFd::StdErr => Some((*fd, OpenedFd::StdErr)),
+            })
+            .collect::<HashMap<RawFd, OpenedFd>>();
         Ok(OutputDevice {
             redirects,
             stdout: String::new(),
@@ -161,20 +172,20 @@ impl OutputDevice {
     fn flush_fd(&mut self, to_fd: u16, output: &str) -> Result<(), Report> {
         let out_obj = match self.redirects.get_mut(&(to_fd as RawFd)) {
             Some(o) => o,
-            None => return Err(Report::new(
-                std::io::Error::from_raw_os_error(
-                    libc::EBADF
-                ))),
+            None => return Err(Report::new(std::io::Error::from_raw_os_error(libc::EBADF))),
         };
         match out_obj {
-            OpenedFd::File{file, writable: true} => {
-                write!(file, "{}", output)?;
-            },
+            OpenedFd::File {
+                file,
+                writable: true,
+            } => {
+                write!(file, "{output}")?;
+            }
             OpenedFd::PipeWriter(pipe) => {
-                write!(pipe, "{}", output)?;
-            },
-            OpenedFd::StdOut => print!("{}", output),
-            OpenedFd::StdErr => eprint!("{}", output),
+                write!(pipe, "{output}")?;
+            }
+            OpenedFd::StdOut => print!("{output}"),
+            OpenedFd::StdErr => eprint!("{output}"),
             _ => panic!("OutputDevice: received input object"),
         }
         Ok(())
