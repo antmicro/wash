@@ -27,7 +27,6 @@ use command_fds::{CommandFdExt, FdMapping};
 use conch_parser::lexer::Lexer;
 use conch_parser::parse::{DefaultParser, ParseError};
 use lazy_static::lazy_static;
-#[cfg(not(target_os = "wasi"))]
 use libc;
 #[cfg(not(target_os = "wasi"))]
 use os_pipe::{PipeReader, PipeWriter};
@@ -369,16 +368,27 @@ impl Shell {
     }
 
     fn parse_prompt_string(&self) -> String {
+        fn get_hostname() -> String {
+            let mut name = unsafe { std::mem::zeroed() };
+            let ret = unsafe { libc::uname(&mut name) };
+
+            if ret == 0 {
+                unsafe {
+                    std::str::from_utf8_unchecked(std::mem::transmute(name.nodename.as_ref()))
+                }
+                .to_string()
+            } else {
+                String::from("hostname")
+            }
+        }
+
         env::var("PS1")
             .unwrap_or_else(|_| "\x1b[1;34m\\u@\\h \x1b[1;33m\\w$\x1b[0m ".to_string())
             .replace(
                 "\\u",
                 &env::var("USER").unwrap_or_else(|_| "user".to_string()),
             )
-            .replace(
-                "\\h",
-                &env::var("HOSTNAME").unwrap_or_else(|_| "hostname".to_string()),
-            )
+            .replace("\\h", &get_hostname())
             // FIXME: should only replace if it starts with HOME
             .replace(
                 "\\w",
