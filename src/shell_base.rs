@@ -372,22 +372,17 @@ impl Shell {
         fn get_hostname() -> String {
             #[cfg(not(target_os = "wasi"))]
             {
-                let mut name = unsafe { std::mem::zeroed() };
+                let mut name: libc::utsname = unsafe { std::mem::zeroed() };
                 let ret = unsafe { libc::uname(&mut name) };
 
                 if ret == 0 {
-                    unsafe {
-                        std::str::from_utf8_unchecked(std::mem::transmute(name.nodename.as_ref()))
-                    }
-                    .to_string()
-                } else {
-                    String::from("hostname")
+                    return unsafe {
+                        String::from_utf8_lossy(std::mem::transmute(name.nodename.as_ref()))
+                            .into_owned()
+                    };
                 }
             }
-            #[cfg(target_os = "wasi")]
-            {
-                env::var("HOSTNAME").unwrap_or_else(|_| "hostname".to_string())
-            }
+            env::var("HOSTNAME").unwrap_or_else(|_| "hostname".to_string())
         }
 
         env::var("PS1")
