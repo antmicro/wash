@@ -44,6 +44,7 @@ pub const EXIT_SUCCESS: i32 = 0;
 pub const EXIT_FAILURE: i32 = 1;
 pub const EXIT_CRITICAL_FAILURE: i32 = 2;
 pub const EXIT_CMD_NOT_FOUND: i32 = 127;
+pub const EXIT_INTERRUPTED: i32 = 130;
 
 pub const STDIN: Fd = 0;
 pub const STDOUT: Fd = 1;

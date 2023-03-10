@@ -15,7 +15,7 @@ use std::path::PathBuf;
 use conch_parser::ast;
 use glob::Pattern;
 
-use crate::shell_base::{Redirect, Shell, EXIT_FAILURE, EXIT_SUCCESS, STDIN, STDOUT};
+use crate::shell_base::{Redirect, Shell, EXIT_FAILURE, EXIT_SUCCESS, EXIT_INTERRUPTED, STDIN, STDOUT};
 
 pub fn interpret(shell: &mut Shell, cmd: &ast::TopLevelCommand<String>) -> i32 {
     handle_top_level_command(shell, cmd)
@@ -206,6 +206,9 @@ fn handle_compound_command(
                     env::set_var(var, handle_top_level_word(shell, word).unwrap());
                     for command in body {
                         exit_status = handle_top_level_command(shell, command);
+                        if exit_status == EXIT_INTERRUPTED {
+                            return exit_status;
+                        }
                     }
                 }
             }
@@ -248,7 +251,10 @@ fn handle_compound_command(
                 exit_status = guard_body
                     .body
                     .iter()
-                    .fold(EXIT_SUCCESS, |_, x| handle_top_level_command(shell, x))
+                    .fold(EXIT_SUCCESS, |_, x| handle_top_level_command(shell, x));
+                if exit_status == EXIT_INTERRUPTED {
+                    break;
+                }
             }
             exit_status
         }
