@@ -223,10 +223,16 @@ fn handle_compound_command(
             for guard_body in conditionals {
                 for command in &guard_body.guard {
                     guard_exit = handle_top_level_command(shell, command);
+                    if guard_exit == EXIT_INTERRUPTED {
+                        return guard_exit;
+                    }
                 }
                 if guard_exit == EXIT_SUCCESS {
                     for command in &guard_body.body {
                         exit_status = handle_top_level_command(shell, command);
+                        if guard_exit == EXIT_INTERRUPTED {
+                            return guard_exit;
+                        }
                     }
                     break;
                 }
@@ -235,6 +241,9 @@ fn handle_compound_command(
                 if let Some(els) = else_branch {
                     for command in els {
                         exit_status = handle_top_level_command(shell, command);
+                        if guard_exit == EXIT_INTERRUPTED {
+                            return guard_exit;
+                        }
                     }
                 }
             };
