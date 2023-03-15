@@ -272,6 +272,9 @@ fn handle_compound_command(
             if let Some(handled_word) = handle_top_level_word(shell, word) {
                 for arm in arms {
                     if arm.patterns.iter().any(|pattern| {
+                        // TODO: Ctrl-C is not handled during processing pattern because `Subst`
+                        // is not handled and we cannot execute any command in pattern
+                        // TODO: handled_pattern is error message when handle_top_level_word fails
                         if let Some(handled_pattern) = handle_top_level_word(shell, pattern) {
                             if let Ok(pat) = Pattern::new(&handled_pattern) {
                                 pat.matches(&handled_word)
@@ -286,16 +289,15 @@ fn handle_compound_command(
                             false
                         }
                     }) {
-                        exit_status = arm
-                            .body
-                            .iter()
-                            .fold(EXIT_SUCCESS, |_, x| handle_top_level_command(shell, x));
+                        for command in arm.body.iter() {
+                            exit_status = handle_top_level_command(shell, command);
+                            if exit_status == EXIT_INTERRUPTED {
+                                return exit_status;
+                            }
+                        }
                         break;
                     }
                 }
-            } else {
-                // if the word could not be matched, exit with failure
-                exit_status = EXIT_FAILURE;
             }
             exit_status
         }
