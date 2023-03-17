@@ -46,6 +46,7 @@ fn handle_listable_command(
 
     for next_cmd in &list.rest {
         match (status_code, next_cmd) {
+            (EXIT_INTERRUPTED, _) => return status_code,
             (EXIT_SUCCESS, ast::AndOr::And(cmd)) => {
                 status_code = match &cmd {
                     ast::ListableCommand::Single(cmd) => {
@@ -230,19 +231,21 @@ fn handle_compound_command(
                 if guard_exit == EXIT_SUCCESS {
                     for command in &guard_body.body {
                         exit_status = handle_top_level_command(shell, command);
-                        if guard_exit == EXIT_INTERRUPTED {
-                            return guard_exit;
+                        if exit_status == EXIT_INTERRUPTED {
+                            return exit_status;
                         }
                     }
                     break;
+                } else {
+                    shell.last_exit_status = EXIT_SUCCESS;
                 }
             }
             if guard_exit != EXIT_SUCCESS {
                 if let Some(els) = else_branch {
                     for command in els {
                         exit_status = handle_top_level_command(shell, command);
-                        if guard_exit == EXIT_INTERRUPTED {
-                            return guard_exit;
+                        if exit_status == EXIT_INTERRUPTED {
+                            return exit_status;
                         }
                     }
                 }
@@ -250,22 +253,27 @@ fn handle_compound_command(
             exit_status
         }
         ast::CompoundCommandKind::While(guard_body) => {
-            let mut exit_status = EXIT_SUCCESS;
-            while guard_body
-                .guard
-                .iter()
-                .fold(EXIT_SUCCESS, |_, x| handle_top_level_command(shell, x))
-                == EXIT_SUCCESS
-            {
-                exit_status = guard_body
-                    .body
-                    .iter()
-                    .fold(EXIT_SUCCESS, |_, x| handle_top_level_command(shell, x));
-                if exit_status == EXIT_INTERRUPTED {
-                    break;
+            loop {
+                let mut guard_status = EXIT_SUCCESS;
+                for cmd in guard_body.guard.iter() {
+                    guard_status = handle_top_level_command(shell, cmd);
+                    if guard_status == EXIT_INTERRUPTED {
+                        return guard_status;
+                    }
+                }
+
+                if guard_status != EXIT_SUCCESS {
+                    shell.last_exit_status = EXIT_SUCCESS;
+                    return EXIT_SUCCESS;
+                }
+
+                for cmd in guard_body.body.iter() {
+                    let body_status = handle_top_level_command(shell, cmd);
+                    if body_status == EXIT_INTERRUPTED {
+                        return body_status;
+                    }
                 }
             }
-            exit_status
         }
         ast::CompoundCommandKind::Case { word, arms } => {
             let mut exit_status = EXIT_SUCCESS;
