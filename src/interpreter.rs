@@ -203,8 +203,15 @@ fn handle_compound_command(
         ast::CompoundCommandKind::For { var, words, body } => {
             let mut exit_status = EXIT_SUCCESS;
             if let Some(w) = words {
-                for word in w {
-                    env::set_var(var, handle_top_level_word(shell, word).unwrap());
+                let mut words = vec![];
+                for word in w.iter() {
+                    // TODO: When we start handle `Subst` commands we have to handle Ctrl-C here
+                    if let Some(word) = handle_top_level_word(shell, word) {
+                        words.push(word);
+                    }
+                }
+                for word in words {
+                    env::set_var(var, word);
                     for command in body {
                         exit_status = handle_top_level_command(shell, command);
                         if exit_status == EXIT_INTERRUPTED {
@@ -282,7 +289,6 @@ fn handle_compound_command(
                     if arm.patterns.iter().any(|pattern| {
                         // TODO: Ctrl-C is not handled during processing pattern because `Subst`
                         // is not handled and we cannot execute any command in pattern
-                        // TODO: handled_pattern is error message when handle_top_level_word fails
                         if let Some(handled_pattern) = handle_top_level_word(shell, pattern) {
                             if let Ok(pat) = Pattern::new(&handled_pattern) {
                                 pat.matches(&handled_word)
@@ -294,7 +300,8 @@ fn handle_compound_command(
                                 handled_pattern == handled_word
                             }
                         } else {
-                            false
+                            // When command fails then bash try to match handled_word with empty string
+                            handled_word == ""
                         }
                     }) {
                         for command in arm.body.iter() {
@@ -603,12 +610,18 @@ fn handle_simple_word<'a>(shell: &'a Shell, word: &'a ast::DefaultSimpleWord) ->
                     ""
                 },
             )),
-            any => Some(format!("parameter not yet handled: {any:?}")),
+            any => {
+                eprintln!("parameter not yet handled: {any:?}");
+                None
+            },
         },
         ast::SimpleWord::Star => Some("*".to_string()),
         ast::SimpleWord::Question => Some("?".to_string()),
         ast::SimpleWord::SquareOpen => Some("[".to_string()),
         ast::SimpleWord::SquareClose => Some("]".to_string()),
-        any => Some(format!("simple word not yet handled: {any:?}")),
+        any => {
+            eprintln!("simple word not yet handled: {any:?}");
+            None
+        }
     }
 }
