@@ -878,6 +878,9 @@ impl Shell {
                     self.last_exit_status = EXIT_FAILURE;
                     EXIT_FAILURE
                 }
+            };
+            if exit_status == EXIT_INTERRUPTED {
+                break;
             }
         }
         // TODO: pass proper exit status code

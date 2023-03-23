@@ -4,6 +4,9 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+#[cfg(target_os = "wasi")]
+use std::{collections::HashMap, path::Path};
+#[cfg(not(target_os = "wasi"))]
 use std::collections::HashMap;
 use std::env;
 #[cfg(target_os = "wasi")]
@@ -25,7 +28,6 @@ fn handle_top_level_command(
     shell: &mut Shell,
     top_level_command: &ast::TopLevelCommand<String>,
 ) -> i32 {
-    // println!("{:#?}", cmd);
     match &top_level_command.0 {
         ast::Command::Job(list) => handle_listable_command(shell, list, true),
         ast::Command::List(list) => handle_listable_command(shell, list, false),
@@ -84,7 +86,7 @@ fn handle_pipe(
 ) -> i32 {
     #[cfg(target_os = "wasi")]
     let exit_status = {
-        handle_pipeable_command(
+        let mut exit_code = handle_pipeable_command(
             shell,
             &cmds[0],
             background,
@@ -94,7 +96,11 @@ fn handle_pipe(
         );
 
         for (i, cmd) in cmds.iter().enumerate().skip(1).take(cmds.len() - 2) {
-            handle_pipeable_command(
+            if exit_code == EXIT_INTERRUPTED {
+                break;
+            }
+
+            exit_code = handle_pipeable_command(
                 shell,
                 cmd,
                 background,
@@ -105,27 +111,32 @@ fn handle_pipe(
             );
         }
 
-        let exit_status = handle_pipeable_command(
-            shell,
-            cmds.last().unwrap(),
-            background,
-            &mut vec![Redirect::Read((
-                STDIN,
-                format!("/proc/pipe{}.txt", cmds.len() - 2),
-            ))],
-        );
+        if exit_code != EXIT_INTERRUPTED {
+            exit_code = handle_pipeable_command(
+                shell,
+                cmds.last().unwrap(),
+                background,
+                &mut vec![Redirect::Read((
+                    STDIN,
+                    format!("/proc/pipe{}.txt", cmds.len() - 2),
+                ))],
+            );
+        }
 
         // TODO: temporary solution before in-memory files get implemented
         for i in 0..cmds.len() - 1 {
-            fs::remove_file(format!("/proc/pipe{i}.txt")).unwrap();
+            let pipe_name = format!("/proc/pipe{i}.txt");
+            if Path::new(pipe_name.as_str()).exists() {
+                fs::remove_file(pipe_name.as_str()).unwrap();
+            }
         }
-        exit_status
+        exit_code
     };
 
     #[cfg(not(target_os = "wasi"))]
     let exit_status = {
         let (mut reader, mut writer) = os_pipe::pipe().unwrap();
-        handle_pipeable_command(
+        let mut exit_code = handle_pipeable_command(
             shell,
             &cmds[0],
             background,
@@ -133,9 +144,13 @@ fn handle_pipe(
         );
 
         for cmd in cmds.iter().skip(1).take(cmds.len() - 2) {
+            if exit_code == EXIT_INTERRUPTED {
+                break;
+            }
+
             let prev_reader = reader;
             (reader, writer) = os_pipe::pipe().unwrap();
-            handle_pipeable_command(
+            exit_code = handle_pipeable_command(
                 shell,
                 cmd,
                 background,
@@ -146,14 +161,16 @@ fn handle_pipe(
             );
         }
 
-        let exit_status = handle_pipeable_command(
-            shell,
-            cmds.last().unwrap(),
-            background,
-            &mut vec![Redirect::PipeIn(Some(reader))],
-        );
+        if exit_code != EXIT_INTERRUPTED {
+            exit_code = handle_pipeable_command(
+                shell,
+                cmds.last().unwrap(),
+                background,
+                &mut vec![Redirect::PipeIn(Some(reader))],
+            );
+        }
 
-        exit_status
+        exit_code
     };
 
     // if ! was present at the beginning of the pipe, return logical negation of last command status
