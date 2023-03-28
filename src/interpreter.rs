@@ -301,34 +301,33 @@ fn handle_compound_command(
         }
         ast::CompoundCommandKind::Case { word, arms } => {
             let mut exit_status = EXIT_SUCCESS;
-            if let Some(handled_word) = handle_top_level_word(shell, word) {
-                for arm in arms {
-                    if arm.patterns.iter().any(|pattern| {
-                        // TODO: Ctrl-C is not handled during processing pattern because `Subst`
-                        // is not handled and we cannot execute any command in pattern
-                        if let Some(handled_pattern) = handle_top_level_word(shell, pattern) {
-                            if let Ok(pat) = Pattern::new(&handled_pattern) {
-                                pat.matches(&handled_word)
-                            } else {
-                                // if the pattern contains invalid wildcard, match against literal pattern
-                                // TODO: if there are multiple valid wildcards in the pattern and at least
-                                // one invalid, the pattern will be taken as literal.
-                                // e.g. '[a*' won't match with [abbb
-                                handled_pattern == handled_word
-                            }
+            let handled_word = handle_top_level_word(shell, word).unwrap_or("".to_string());
+            for arm in arms {
+                if arm.patterns.iter().any(|pattern| {
+                    // TODO: Ctrl-C is not handled during processing pattern because `Subst`
+                    // is not handled and we cannot execute any command in pattern
+                    if let Some(handled_pattern) = handle_top_level_word(shell, pattern) {
+                        if let Ok(pat) = Pattern::new(&handled_pattern) {
+                            pat.matches(&handled_word)
                         } else {
-                            // When command fails then bash try to match handled_word with empty string
-                            handled_word == ""
+                            // if the pattern contains invalid wildcard, match against literal pattern
+                            // TODO: if there are multiple valid wildcards in the pattern and at least
+                            // one invalid, the pattern will be taken as literal.
+                            // e.g. '[a*' won't match with [abbb
+                            handled_pattern == handled_word
                         }
-                    }) {
-                        for command in arm.body.iter() {
-                            exit_status = handle_top_level_command(shell, command);
-                            if exit_status == EXIT_INTERRUPTED {
-                                return exit_status;
-                            }
-                        }
-                        break;
+                    } else {
+                        // When command fails then bash try to match handled_word with empty string
+                        handled_word == ""
                     }
+                }) {
+                    for command in arm.body.iter() {
+                        exit_status = handle_top_level_command(shell, command);
+                        if exit_status == EXIT_INTERRUPTED {
+                            return exit_status;
+                        }
+                    }
+                    break;
                 }
             }
             exit_status
