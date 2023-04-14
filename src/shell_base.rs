@@ -14,12 +14,17 @@ use std::fs::{File, OpenOptions};
 use std::io;
 use std::io::ErrorKind;
 use std::io::{BufRead, BufReader, Read, Write};
+#[cfg(target_os = "wasi")]
+use std::mem;
+#[cfg(target_os = "wasi")]
+use std::os::wasi::io::{AsRawFd, FromRawFd};
 #[cfg(not(target_os = "wasi"))]
 use std::os::unix::io::AsRawFd;
 #[cfg(not(target_os = "wasi"))]
 use std::os::unix::prelude::{CommandExt, RawFd};
 use std::path::PathBuf;
-use std::process::exit;
+#[cfg(target_os = "wasi")]
+use std::sync::Mutex;
 
 use color_eyre::Report;
 #[cfg(not(target_os = "wasi"))]
@@ -32,6 +37,9 @@ use libc;
 #[cfg(not(target_os = "wasi"))]
 use os_pipe::{PipeReader, PipeWriter};
 use regex::Regex;
+
+#[cfg(target_os = "wasi")]
+use wasi;
 
 use crate::internals::INTERNALS_MAP;
 use crate::interpreter::interpret;
@@ -323,6 +331,121 @@ fn preprocess_redirects(redirects: &mut [Redirect]) -> (HashMap<RawFd, OpenedFd>
     (fd_redirects, Ok(()))
 }
 
+const TTY_TOKEN: u64 = 1;
+const SIGINT_TOKEN: u64 = 2;
+
+struct InternalEventSource {
+    subs: [wasi::Subscription; 2],
+    events: [wasi::Event; 2],
+    tty_input: File,
+    event_src: File,
+}
+
+impl InternalEventSource {
+    fn read_byte(&mut self) -> Result<Option<u8>, Report> {
+        // subscribe and wait
+        let mut byte: [u8; 1] = [0];
+        let result = unsafe {
+            wasi::poll_oneoff(
+                self.subs.as_ptr(),
+                self.events.as_mut_ptr(),
+                self.subs.len()
+            )
+        };
+
+        let events_count = match result {
+            Ok(n) => n,
+            Err(e) => {
+                return Err(Report::msg(format!("Poll_oneoff returned non zero code = {e}!")));
+            }
+        };
+
+        for event in self.events[0..events_count].iter() {
+            let errno = event.error.raw();
+            if errno > 0 {
+                return Err(Report::msg(format!("Poll_oneoff returned non zero code for event!")));
+            }
+        }
+
+        for event in self.events[0..events_count].iter() {
+            match (event.userdata, event.type_) {
+                (TTY_TOKEN, wasi::EVENTTYPE_FD_READ) => {
+                    self.tty_input.read_exact(&mut byte)?
+                },
+                (SIGINT_TOKEN, wasi::EVENTTYPE_FD_READ) => {
+                    let mut read_buff: [u8; wasi_ext_lib::WASI_EVENTS_MASK_SIZE] = [
+                        0u8; wasi_ext_lib::WASI_EVENTS_MASK_SIZE
+                    ];
+
+                    self.event_src.read_exact(&mut read_buff)?;
+
+                    let events = u32::from_le_bytes(read_buff) as wasi_ext_lib::WasiEvents;
+
+                    if events & wasi_ext_lib::WASI_EVENT_SIGINT != 0 {
+                        return Ok(None);
+                    } else {
+                        return Err(Report::msg("Event_source did not return subsribed SigInt event!"))
+                    }
+                },
+                _ => unreachable!(),
+            }
+        }
+
+        Ok(Some(byte[0]))
+    }
+}
+
+impl Default for InternalEventSource {
+    fn default() -> Self {
+        let input_fd = STDIN as i32;
+
+        if !wasi_ext_lib::isatty(input_fd).unwrap() {
+            panic!("Input is not TTY!");
+        }
+
+        let event_source_fd = match wasi_ext_lib::event_source_fd(
+            wasi_ext_lib::WASI_EVENT_SIGINT
+        ) {
+            Ok(fd) => { fd },
+            Err(e) => {
+                panic!("Cannot obtain evnt_source_fd, error code = {}", e);
+            },
+        };
+
+        InternalEventSource {
+            subs: [
+                wasi::Subscription {
+                    userdata: TTY_TOKEN,
+                    u: wasi::SubscriptionU {
+                        tag: wasi::EVENTTYPE_FD_READ.raw(),
+                        u: wasi::SubscriptionUU {
+                            fd_read: wasi::SubscriptionFdReadwrite {
+                                file_descriptor: input_fd as u32
+                            }
+                        }
+                    }
+                },
+                wasi::Subscription {
+                    userdata: SIGINT_TOKEN,
+                    u: wasi::SubscriptionU {
+                        tag: wasi::EVENTTYPE_FD_READ.raw(),
+                        u: wasi::SubscriptionUU {
+                            fd_read: wasi::SubscriptionFdReadwrite {
+                                file_descriptor: event_source_fd as u32
+                            }
+                        }
+                    }
+                },
+            ],
+            events: unsafe { mem::zeroed() },
+            tty_input: unsafe { File::from_raw_fd(input_fd) },
+            event_src: unsafe { File::from_raw_fd(event_source_fd) },
+        }
+    }
+}
+
+static INTERNAL_EVENT_READER: Mutex<Option<InternalEventSource>> = Mutex::new(None);
+
 pub struct Shell {
     pub pwd: PathBuf,
     pub vars: HashMap<String, String>,
@@ -428,10 +551,23 @@ impl Shell {
 
     /// Builds a line from standard input.
     // TODO: maybe wrap in one more loop and only return when non-empty line is produced?
-    fn get_line(&mut self, input: &mut String) {
+    // returns Ok(false) when SigInt occurred
+    fn get_line(&mut self, input: &mut String) -> Result<bool, Report> {
+        let mut guard = if let Ok(guard) = INTERNAL_EVENT_READER.lock() {
+            guard
+        } else {
+            return Err(Report::msg("Cannot lock internal event source object!"));
+        };
+
+        let reader = if let Some(reader) = &mut *guard {
+            reader
+        } else {
+            return Err(Report::msg("Internal event source object not initialized!"));
+        };
+
         let mut input_stash = String::new();
 
-        let mut c1 = [0];
+        let mut c1;
         let mut escaped = false;
         let mut history_entry_to_display: i32 = -1;
         if self.insert_mode {
@@ -442,20 +578,25 @@ impl Shell {
 
         loop {
             // this is to handle EOF when piping to shell
-            match io::stdin().read_exact(&mut c1) {
-                Ok(()) => {}
-                Err(_) => exit(EXIT_SUCCESS),
+            match reader.read_byte()? {
+                Some(byte) => { c1 = byte },
+                None => { return Ok(false) },
             }
             if escaped {
-                match c1[0] {
+                match c1 {
                     0x5b => {
-                        let mut c2 = [0];
-                        io::stdin().read_exact(&mut c2).unwrap();
-                        match c2[0] {
+                        let c2= match reader.read_byte()? {
+                            Some(byte) => { byte },
+                            None => { return Ok(false) },
+                        };
+
+                        match c2 {
                             0x32 | 0x33 | 0x35 | 0x36 => {
-                                let mut c3 = [0];
-                                io::stdin().read_exact(&mut c3).unwrap();
-                                match [c2[0], c3[0]] {
+                                let c3= match reader.read_byte()? {
+                                    Some(byte) => { byte },
+                                    None => { return Ok(false) },
+                                };
+                                match [c2, c3] {
                                     // PageUp
                                     [0x35, 0x7e] => {
                                         if !self.history.is_empty() && history_entry_to_display != 0
@@ -520,14 +661,13 @@ impl Shell {
                                     }
                                     [0x33, 0x3b] => {
                                         println!("TODO: SHIFT + DELETE");
-                                        let mut c4 = [0];
+                                        let mut c4 = [0; 2];
                                         // TWO MORE! TODO: improve!
-                                        io::stdin().read_exact(&mut c4).unwrap();
                                         io::stdin().read_exact(&mut c4).unwrap();
                                         escaped = false;
                                     }
                                     _ => {
-                                        println!("TODO: [ + 0x{:02x} + 0x{:02x}", c2[0], c3[0]);
+                                        println!("TODO: [ + 0x{:02x} + 0x{:02x}", c2, c3);
                                         escaped = false;
                                     }
                                 }
@@ -608,7 +748,7 @@ impl Shell {
                                 escaped = false;
                             }
                             _ => {
-                                println!("WE HAVE UNKNOWN CONTROL CODE '[' + {}", c2[0]);
+                                println!("WE HAVE UNKNOWN CONTROL CODE '[' + {}", c2);
                                 escaped = false;
                             }
                         }
@@ -618,16 +758,16 @@ impl Shell {
                     }
                 }
             } else {
-                if c1[0] != 0x1b {
+                if c1 != 0x1b {
                     history_entry_to_display = -1;
                 }
-                match c1[0] {
+                match c1 {
                     // enter
                     10 => {
                         self.echo("\n");
                         self.cursor_position = 0;
                         *input = input.trim().to_string();
-                        return;
+                        return Ok(true);
                     }
                     // backspace
                     127 => {
@@ -659,18 +799,18 @@ impl Shell {
                     // regular characters
                     _ => {
                         if !self.insert_mode {
-                            input.insert(self.cursor_position, c1[0] as char);
+                            input.insert(self.cursor_position, c1 as char);
                         } else {
                             // in insert mode, when cursor is in the middle, chars are replaced
                             // instead of being put in the middle while moving next characters further
                             if self.cursor_position != input.len() {
                                 input.replace_range(
                                     self.cursor_position..self.cursor_position + 1,
-                                    std::str::from_utf8(&[c1[0]]).unwrap(),
+                                    std::str::from_utf8(&[c1]).unwrap(),
                                 );
                             } else {
                                 // if cursor is at the end, chars are input regularly
-                                input.push(c1[0] as char);
+                                input.push(c1 as char);
                             }
                         }
                         // echo
@@ -796,11 +936,18 @@ impl Shell {
             println!("{}", fs::read_to_string(motd_path).unwrap());
         }
 
+        Self::register_sigint()?;
+
         let mut input = String::new();
         // line loop
         loop {
             self.print_prompt(&input);
-            self.get_line(&mut input);
+            if !self.get_line(&mut input)? {
+                self.last_exit_status = EXIT_INTERRUPTED;
+                input.clear();
+                println!();
+            }
+
             if input.is_empty() {
                 continue;
             }
@@ -1041,5 +1188,25 @@ impl Shell {
             EXIT_CRITICAL_FAILURE
         };
         Ok(self.last_exit_status)
+    }
+
+    fn register_sigint() -> Result<(), Report> {
+        let mut guard = if let Ok(guard) = INTERNAL_EVENT_READER.lock() {
+            guard
+        } else {
+            return Err(Report::msg("Cannot lock internal event source object!"));
+        };
+
+        if guard.is_some() {
+            Err(Report::msg("SigInt is already registered!"))
+        } else {
+            let event_source = guard.get_or_insert_with(InternalEventSource::default);
+    
+            if let Err(e) = wasi_ext_lib::attach_sigint(event_source.event_src.as_raw_fd()) {
+                Err(Report::msg(format!("Cannot attach SigInt event descriptor, error code = {e}!")))
+            } else {
+                Ok(())
+            }
+        }
     }
 }
