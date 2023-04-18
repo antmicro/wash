@@ -331,9 +331,7 @@ fn preprocess_redirects(redirects: &mut [Redirect]) -> (HashMap<RawFd, OpenedFd>
     (fd_redirects, Ok(()))
 }
 
-const TTY_TOKEN: u64 = 1;
-const SIGINT_TOKEN: u64 = 2;
-
+#[cfg(target_os = "wasi")]
 struct InternalEventSource {
     subs: [wasi::Subscription; 2],
     events: [wasi::Event; 2],
@@ -341,7 +339,11 @@ struct InternalEventSource {
     event_src: File,
 }
 
+#[cfg(target_os = "wasi")]
 impl InternalEventSource {
+    const TTY_TOKEN: u64 = 1;
+    const SIGINT_TOKEN: u64 = 2;
+
     fn read_byte(&mut self) -> Result<Option<u8>, Report> {
         // subscribe and wait
         let mut byte: [u8; 1] = [0];
@@ -369,10 +371,10 @@ impl InternalEventSource {
 
         for event in self.events[0..events_count].iter() {
             match (event.userdata, event.type_) {
-                (TTY_TOKEN, wasi::EVENTTYPE_FD_READ) => {
+                (Self::TTY_TOKEN, wasi::EVENTTYPE_FD_READ) => {
                     self.tty_input.read_exact(&mut byte)?
                 },
-                (SIGINT_TOKEN, wasi::EVENTTYPE_FD_READ) => {
+                (Self::SIGINT_TOKEN, wasi::EVENTTYPE_FD_READ) => {
                     let mut read_buff: [u8; wasi_ext_lib::WASI_EVENTS_MASK_SIZE] = [
                         0u8; wasi_ext_lib::WASI_EVENTS_MASK_SIZE
                     ];
@@ -395,6 +397,7 @@ impl InternalEventSource {
     }
 }
 
+#[cfg(target_os = "wasi")]
 impl Default for InternalEventSource {
     fn default() -> Self {
         let input_fd = STDIN as i32;
@@ -415,7 +418,7 @@ impl Default for InternalEventSource {
         InternalEventSource {
             subs: [
                 wasi::Subscription {
-                    userdata: TTY_TOKEN,
+                    userdata: Self::TTY_TOKEN,
                     u: wasi::SubscriptionU {
                         tag: wasi::EVENTTYPE_FD_READ.raw(),
                         u: wasi::SubscriptionUU {
@@ -426,7 +429,7 @@ impl Default for InternalEventSource {
                     }
                 },
                 wasi::Subscription {
-                    userdata: SIGINT_TOKEN,
+                    userdata: Self::SIGINT_TOKEN,
                     u: wasi::SubscriptionU {
                         tag: wasi::EVENTTYPE_FD_READ.raw(),
                         u: wasi::SubscriptionUU {
@@ -444,7 +447,21 @@ impl Default for InternalEventSource {
     }
 }
 
+#[cfg(target_os = "wasi")]
 static INTERNAL_EVENT_READER: Mutex<Option<InternalEventSource>> = Mutex::new(None);
+
+#[cfg(not(target_os = "wasi"))]
+struct InternalReader {}
+
+#[cfg(not(target_os = "wasi"))]
+impl InternalReader {
+    fn read_byte(&self) -> Result<Option<u8>, Report> {
+        let mut buffer: [u8; 1] = [0];
+        io::stdin().read_exact(&mut buffer)?;
+
+        Ok(Some(buffer[0]))
+    }
+}
 
 pub struct Shell {
     pub pwd: PathBuf,
@@ -553,17 +570,22 @@ impl Shell {
     // TODO: maybe wrap in one more loop and only return when non-empty line is produced?
     // returns Ok(false) when SigInt occurred
     fn get_line(&mut self, input: &mut String) -> Result<bool, Report> {
+        #[cfg(target_os = "wasi")]
         let mut guard = if let Ok(guard) = INTERNAL_EVENT_READER.lock() {
             guard
         } else {
             return Err(Report::msg("Cannot lock internal event source object!"));
         };
 
+        #[cfg(target_os = "wasi")]
         let reader = if let Some(reader) = &mut *guard {
             reader
         } else {
             return Err(Report::msg("Internal event source object not initialized!"));
         };
+
+        #[cfg(not(target_os = "wasi"))]
+        let reader = InternalReader {};
 
         let mut input_stash = String::new();
 
@@ -936,6 +958,7 @@ impl Shell {
             println!("{}", fs::read_to_string(motd_path).unwrap());
         }
 
+        #[cfg(target_os = "wasi")]
         Self::register_sigint()?;
 
         let mut input = String::new();
@@ -1190,6 +1213,7 @@ impl Shell {
         Ok(self.last_exit_status)
     }
 
+    #[cfg(target_os = "wasi")]
     fn register_sigint() -> Result<(), Report> {
         let mut guard = if let Ok(guard) = INTERNAL_EVENT_READER.lock() {
             guard
