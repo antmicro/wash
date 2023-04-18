@@ -23,9 +23,6 @@ use std::os::unix::io::AsRawFd;
 #[cfg(not(target_os = "wasi"))]
 use std::os::unix::prelude::{CommandExt, RawFd};
 use std::path::PathBuf;
-#[cfg(target_os = "wasi")]
-use std::sync::Mutex;
-
 use color_eyre::Report;
 #[cfg(not(target_os = "wasi"))]
 use command_fds::{CommandFdExt, FdMapping};
@@ -344,7 +341,7 @@ impl InternalEventSource {
     const TTY_TOKEN: u64 = 1;
     const SIGINT_TOKEN: u64 = 2;
 
-    fn read_byte(&mut self) -> Result<Option<u8>, Report> {
+    pub fn read_byte(&mut self) -> Result<Option<u8>, Report> {
         // subscribe and wait
         let mut byte: [u8; 1] = [0];
         let result = unsafe {
@@ -447,19 +444,26 @@ impl Default for InternalEventSource {
     }
 }
 
-#[cfg(target_os = "wasi")]
-static INTERNAL_EVENT_READER: Mutex<Option<InternalEventSource>> = Mutex::new(None);
+enum InternalReader {
+    #[cfg(target_os = "wasi")]
+    StdinWithSigInt(InternalEventSource),
+    OnlyStdin,
+}
 
-#[cfg(not(target_os = "wasi"))]
-struct InternalReader {}
-
-#[cfg(not(target_os = "wasi"))]
 impl InternalReader {
-    fn read_byte(&self) -> Result<Option<u8>, Report> {
-        let mut buffer: [u8; 1] = [0];
-        io::stdin().read_exact(&mut buffer)?;
+    fn read_byte(&mut self) -> Result<Option<u8>, Report> {
+        match self {
+            #[cfg(target_os = "wasi")]
+            InternalReader::StdinWithSigInt(reader) => {
+                reader.read_byte()
+            },
+            InternalReader::OnlyStdin => {
+                let mut buffer: [u8; 1] = [0];
+                io::stdin().read_exact(&mut buffer)?;
 
-        Ok(Some(buffer[0]))
+                Ok(Some(buffer[0]))
+            }
+        }
     }
 }
 
@@ -474,6 +478,8 @@ pub struct Shell {
     should_echo: bool,
     cursor_position: usize,
     insert_mode: bool,
+
+    reader: InternalReader,
 }
 
 impl Shell {
@@ -500,6 +506,8 @@ impl Shell {
             last_exit_status: EXIT_SUCCESS,
             cursor_position: 0,
             insert_mode: false,
+
+            reader: InternalReader::OnlyStdin,
         }
     }
 
@@ -570,23 +578,6 @@ impl Shell {
     // TODO: maybe wrap in one more loop and only return when non-empty line is produced?
     // returns Ok(false) when SigInt occurred
     fn get_line(&mut self, input: &mut String) -> Result<bool, Report> {
-        #[cfg(target_os = "wasi")]
-        let mut guard = if let Ok(guard) = INTERNAL_EVENT_READER.lock() {
-            guard
-        } else {
-            return Err(Report::msg("Cannot lock internal event source object!"));
-        };
-
-        #[cfg(target_os = "wasi")]
-        let reader = if let Some(reader) = &mut *guard {
-            reader
-        } else {
-            return Err(Report::msg("Internal event source object not initialized!"));
-        };
-
-        #[cfg(not(target_os = "wasi"))]
-        let reader = InternalReader {};
-
         let mut input_stash = String::new();
 
         let mut c1;
@@ -600,21 +591,21 @@ impl Shell {
 
         loop {
             // this is to handle EOF when piping to shell
-            match reader.read_byte()? {
+            match self.reader.read_byte()? {
                 Some(byte) => { c1 = byte },
                 None => { return Ok(false) },
             }
             if escaped {
                 match c1 {
                     0x5b => {
-                        let c2= match reader.read_byte()? {
+                        let c2= match self.reader.read_byte()? {
                             Some(byte) => { byte },
                             None => { return Ok(false) },
                         };
 
                         match c2 {
                             0x32 | 0x33 | 0x35 | 0x36 => {
-                                let c3= match reader.read_byte()? {
+                                let c3= match self.reader.read_byte()? {
                                     Some(byte) => { byte },
                                     None => { return Ok(false) },
                                 };
@@ -958,9 +949,6 @@ impl Shell {
             println!("{}", fs::read_to_string(motd_path).unwrap());
         }
 
-        #[cfg(target_os = "wasi")]
-        Self::register_sigint()?;
-
         let mut input = String::new();
         // line loop
         loop {
@@ -1214,23 +1202,13 @@ impl Shell {
     }
 
     #[cfg(target_os = "wasi")]
-    fn register_sigint() -> Result<(), Report> {
-        let mut guard = if let Ok(guard) = INTERNAL_EVENT_READER.lock() {
-            guard
+    pub fn register_sigint(&mut self) -> Result<(), Report> {
+        let event_source = InternalEventSource::default();
+        if let Err(e) = wasi_ext_lib::attach_sigint(event_source.event_src.as_raw_fd()) {
+            Err(Report::msg(format!("Cannot attach SigInt event descriptor, error code = {e}!")))
         } else {
-            return Err(Report::msg("Cannot lock internal event source object!"));
-        };
-
-        if guard.is_some() {
-            Err(Report::msg("SigInt is already registered!"))
-        } else {
-            let event_source = guard.get_or_insert_with(InternalEventSource::default);
-    
-            if let Err(e) = wasi_ext_lib::attach_sigint(event_source.event_src.as_raw_fd()) {
-                Err(Report::msg(format!("Cannot attach SigInt event descriptor, error code = {e}!")))
-            } else {
-                Ok(())
-            }
+            self.reader = InternalReader::StdinWithSigInt(event_source);
+            Ok(())
         }
     }
 }
