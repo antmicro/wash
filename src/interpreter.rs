@@ -4,11 +4,10 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-#[cfg(target_os = "wasi")]
-use std::{collections::HashMap, path::Path};
-#[cfg(not(target_os = "wasi"))]
 use std::collections::HashMap;
 use std::env;
+#[cfg(target_os = "wasi")]
+use std::path::Path;
 #[cfg(target_os = "wasi")]
 use std::fs;
 #[cfg(not(target_os = "wasi"))]
@@ -220,13 +219,9 @@ fn handle_compound_command(
         ast::CompoundCommandKind::For { var, words, body } => {
             let mut exit_status = EXIT_SUCCESS;
             if let Some(w) = words {
-                let mut words = vec![];
-                for word in w.iter() {
-                    // TODO: When we start handle `Subst` commands we have to handle Ctrl-C here
-                    if let Some(word) = handle_top_level_word(shell, word) {
-                        words.push(word);
-                    }
-                }
+                let words: Vec<String> = w.iter().filter_map(|word| 
+                    handle_top_level_word(shell, word)
+                ).collect();
                 for word in words {
                     env::set_var(var, word);
                     for command in body {
