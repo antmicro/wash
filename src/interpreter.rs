@@ -7,17 +7,19 @@
 use std::collections::HashMap;
 use std::env;
 #[cfg(target_os = "wasi")]
-use std::path::Path;
-#[cfg(target_os = "wasi")]
 use std::fs;
 #[cfg(not(target_os = "wasi"))]
 use std::os::unix::prelude::RawFd;
+#[cfg(target_os = "wasi")]
+use std::path::Path;
 use std::path::PathBuf;
 
 use conch_parser::ast;
 use glob::Pattern;
 
-use crate::shell_base::{Redirect, Shell, EXIT_FAILURE, EXIT_SUCCESS, EXIT_INTERRUPTED, STDIN, STDOUT};
+use crate::shell_base::{
+    Redirect, Shell, EXIT_FAILURE, EXIT_INTERRUPTED, EXIT_SUCCESS, STDIN, STDOUT,
+};
 
 pub fn interpret(shell: &mut Shell, cmd: &ast::TopLevelCommand<String>) -> i32 {
     handle_top_level_command(shell, cmd)
@@ -219,9 +221,10 @@ fn handle_compound_command(
         ast::CompoundCommandKind::For { var, words, body } => {
             let mut exit_status = EXIT_SUCCESS;
             if let Some(w) = words {
-                let words: Vec<String> = w.iter().filter_map(|word| 
-                    handle_top_level_word(shell, word)
-                ).collect();
+                let words: Vec<String> = w
+                    .iter()
+                    .filter_map(|word| handle_top_level_word(shell, word))
+                    .collect();
                 for word in words {
                     env::set_var(var, word);
                     for command in body {
@@ -271,29 +274,27 @@ fn handle_compound_command(
             };
             exit_status
         }
-        ast::CompoundCommandKind::While(guard_body) => {
-            loop {
-                let mut guard_status = EXIT_SUCCESS;
-                for cmd in guard_body.guard.iter() {
-                    guard_status = handle_top_level_command(shell, cmd);
-                    if guard_status == EXIT_INTERRUPTED {
-                        return guard_status;
-                    }
-                }
-
-                if guard_status != EXIT_SUCCESS {
-                    shell.last_exit_status = EXIT_SUCCESS;
-                    return EXIT_SUCCESS;
-                }
-
-                for cmd in guard_body.body.iter() {
-                    let body_status = handle_top_level_command(shell, cmd);
-                    if body_status == EXIT_INTERRUPTED {
-                        return body_status;
-                    }
+        ast::CompoundCommandKind::While(guard_body) => loop {
+            let mut guard_status = EXIT_SUCCESS;
+            for cmd in guard_body.guard.iter() {
+                guard_status = handle_top_level_command(shell, cmd);
+                if guard_status == EXIT_INTERRUPTED {
+                    return guard_status;
                 }
             }
-        }
+
+            if guard_status != EXIT_SUCCESS {
+                shell.last_exit_status = EXIT_SUCCESS;
+                return EXIT_SUCCESS;
+            }
+
+            for cmd in guard_body.body.iter() {
+                let body_status = handle_top_level_command(shell, cmd);
+                if body_status == EXIT_INTERRUPTED {
+                    return body_status;
+                }
+            }
+        },
         ast::CompoundCommandKind::Case { word, arms } => {
             let mut exit_status = EXIT_SUCCESS;
             let handled_word = handle_top_level_word(shell, word).unwrap_or("".to_string());
@@ -313,7 +314,7 @@ fn handle_compound_command(
                         }
                     } else {
                         // When command fails then bash try to match handled_word with empty string
-                        handled_word == ""
+                        handled_word.is_empty()
                     }
                 }) {
                     for command in arm.body.iter() {
@@ -624,7 +625,7 @@ fn handle_simple_word<'a>(shell: &'a Shell, word: &'a ast::DefaultSimpleWord) ->
             any => {
                 eprintln!("parameter not yet handled: {any:?}");
                 None
-            },
+            }
         },
         ast::SimpleWord::Star => Some("*".to_string()),
         ast::SimpleWord::Question => Some("?".to_string()),

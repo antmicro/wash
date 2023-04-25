@@ -4,6 +4,17 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+use color_eyre::Report;
+#[cfg(not(target_os = "wasi"))]
+use command_fds::{CommandFdExt, FdMapping};
+use conch_parser::lexer::Lexer;
+use conch_parser::parse::{DefaultParser, ParseError};
+use lazy_static::lazy_static;
+#[cfg(not(target_os = "wasi"))]
+use libc;
+#[cfg(not(target_os = "wasi"))]
+use os_pipe::{PipeReader, PipeWriter};
+use regex::Regex;
 use std::collections::HashMap;
 #[cfg(not(target_os = "wasi"))]
 use std::collections::HashSet;
@@ -16,24 +27,13 @@ use std::io::ErrorKind;
 use std::io::{BufRead, BufReader, Read, Write};
 #[cfg(target_os = "wasi")]
 use std::mem;
-#[cfg(target_os = "wasi")]
-use std::os::wasi::io::{AsRawFd, FromRawFd};
 #[cfg(not(target_os = "wasi"))]
 use std::os::unix::io::AsRawFd;
 #[cfg(not(target_os = "wasi"))]
 use std::os::unix::prelude::{CommandExt, RawFd};
+#[cfg(target_os = "wasi")]
+use std::os::wasi::io::{AsRawFd, FromRawFd};
 use std::path::PathBuf;
-use color_eyre::Report;
-#[cfg(not(target_os = "wasi"))]
-use command_fds::{CommandFdExt, FdMapping};
-use conch_parser::lexer::Lexer;
-use conch_parser::parse::{DefaultParser, ParseError};
-use lazy_static::lazy_static;
-#[cfg(not(target_os = "wasi"))]
-use libc;
-#[cfg(not(target_os = "wasi"))]
-use os_pipe::{PipeReader, PipeWriter};
-use regex::Regex;
 
 #[cfg(target_os = "wasi")]
 use wasi;
@@ -348,21 +348,23 @@ impl InternalEventSource {
             wasi::poll_oneoff(
                 self.subs.as_ptr(),
                 self.events.as_mut_ptr(),
-                self.subs.len()
+                self.subs.len(),
             )
         };
 
         let events_count = match result {
             Ok(n) => n,
             Err(e) => {
-                return Err(Report::msg(format!("Poll_oneoff returned non zero code = {e}!")));
+                return Err(Report::msg(format!(
+                    "Poll_oneoff returned non zero code = {e}!"
+                )));
             }
         };
 
         for event in self.events[0..events_count].iter() {
             let errno = event.error.raw();
             if errno > 0 {
-                return Err(Report::msg(format!("Poll_oneoff returned non zero code for event!")));
+                return Err(Report::msg("Poll_oneoff returned non zero code for event!"));
             }
         }
 
@@ -370,11 +372,10 @@ impl InternalEventSource {
             match (event.userdata, event.type_) {
                 (Self::TTY_TOKEN, wasi::EVENTTYPE_FD_READ) => {
                     self.tty_input.read_exact(&mut byte)?
-                },
+                }
                 (Self::SIGINT_TOKEN, wasi::EVENTTYPE_FD_READ) => {
-                    let mut read_buff: [u8; wasi_ext_lib::WASI_EVENTS_MASK_SIZE] = [
-                        0u8; wasi_ext_lib::WASI_EVENTS_MASK_SIZE
-                    ];
+                    let mut read_buff: [u8; wasi_ext_lib::WASI_EVENTS_MASK_SIZE] =
+                        [0u8; wasi_ext_lib::WASI_EVENTS_MASK_SIZE];
 
                     self.event_src.read_exact(&mut read_buff)?;
 
@@ -383,9 +384,11 @@ impl InternalEventSource {
                     if events & wasi_ext_lib::WASI_EVENT_SIGINT != 0 {
                         return Ok(None);
                     } else {
-                        return Err(Report::msg("Event_source did not return subsribed SigInt event!"))
+                        return Err(Report::msg(
+                            "Event_source did not return subsribed SigInt event!",
+                        ));
                     }
-                },
+                }
                 _ => unreachable!(),
             }
         }
@@ -403,13 +406,11 @@ impl Default for InternalEventSource {
             panic!("Input is not TTY!");
         }
 
-        let event_source_fd = match wasi_ext_lib::event_source_fd(
-            wasi_ext_lib::WASI_EVENT_SIGINT
-        ) {
-            Ok(fd) => { fd },
+        let event_source_fd = match wasi_ext_lib::event_source_fd(wasi_ext_lib::WASI_EVENT_SIGINT) {
+            Ok(fd) => fd,
             Err(e) => {
                 panic!("Cannot obtain evnt_source_fd, error code = {}", e);
-            },
+            }
         };
 
         InternalEventSource {
@@ -420,10 +421,10 @@ impl Default for InternalEventSource {
                         tag: wasi::EVENTTYPE_FD_READ.raw(),
                         u: wasi::SubscriptionUU {
                             fd_read: wasi::SubscriptionFdReadwrite {
-                                file_descriptor: input_fd as u32
-                            }
-                        }
-                    }
+                                file_descriptor: input_fd as u32,
+                            },
+                        },
+                    },
                 },
                 wasi::Subscription {
                     userdata: Self::SIGINT_TOKEN,
@@ -431,10 +432,10 @@ impl Default for InternalEventSource {
                         tag: wasi::EVENTTYPE_FD_READ.raw(),
                         u: wasi::SubscriptionUU {
                             fd_read: wasi::SubscriptionFdReadwrite {
-                                file_descriptor: event_source_fd as u32
-                            }
-                        }
-                    }
+                                file_descriptor: event_source_fd as u32,
+                            },
+                        },
+                    },
                 },
             ],
             events: unsafe { mem::zeroed() },
@@ -454,9 +455,7 @@ impl InternalReader {
     fn read_byte(&mut self) -> Result<Option<u8>, Report> {
         match self {
             #[cfg(target_os = "wasi")]
-            InternalReader::StdinWithSigInt(reader) => {
-                reader.read_byte()
-            },
+            InternalReader::StdinWithSigInt(reader) => reader.read_byte(),
             InternalReader::OnlyStdin => {
                 let mut buffer: [u8; 1] = [0];
                 io::stdin().read_exact(&mut buffer)?;
@@ -592,22 +591,22 @@ impl Shell {
         loop {
             // this is to handle EOF when piping to shell
             match self.reader.read_byte()? {
-                Some(byte) => { c1 = byte },
-                None => { return Ok(false) },
+                Some(byte) => c1 = byte,
+                None => return Ok(false),
             }
             if escaped {
                 match c1 {
                     0x5b => {
-                        let c2= match self.reader.read_byte()? {
-                            Some(byte) => { byte },
-                            None => { return Ok(false) },
+                        let c2 = match self.reader.read_byte()? {
+                            Some(byte) => byte,
+                            None => return Ok(false),
                         };
 
                         match c2 {
                             0x32 | 0x33 | 0x35 | 0x36 => {
-                                let c3= match self.reader.read_byte()? {
-                                    Some(byte) => { byte },
-                                    None => { return Ok(false) },
+                                let c3 = match self.reader.read_byte()? {
+                                    Some(byte) => byte,
+                                    None => return Ok(false),
                                 };
                                 match [c2, c3] {
                                     // PageUp
@@ -1205,7 +1204,9 @@ impl Shell {
     pub fn register_sigint(&mut self) -> Result<(), Report> {
         let event_source = InternalEventSource::default();
         if let Err(e) = wasi_ext_lib::attach_sigint(event_source.event_src.as_raw_fd()) {
-            Err(Report::msg(format!("Cannot attach SigInt event descriptor, error code = {e}!")))
+            Err(Report::msg(format!(
+                "Cannot attach SigInt event descriptor, error code = {e}!"
+            )))
         } else {
             self.reader = InternalReader::StdinWithSigInt(event_source);
             Ok(())

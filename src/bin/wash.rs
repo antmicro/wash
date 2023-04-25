@@ -144,7 +144,9 @@ fn main() {
             }
             Ok(true) => {
                 #[cfg(target_os = "wasi")]
-                shell.register_sigint().expect("Cannot register InternalEventSource object!");
+                shell
+                    .register_sigint()
+                    .expect("Cannot register InternalEventSource object!");
                 shell.run_interpreter()
             }
             Ok(false) => {
