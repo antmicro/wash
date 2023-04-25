@@ -135,14 +135,27 @@ fn main() {
         shell.run_command(command)
     } else if len != 0 {
         shell.run_script(PathBuf::from(script))
-    // is_fd_tty will fail in WASI runtimes (wasmtime/wasmer/wasiwasm), just run interpreter then
-    } else if is_fd_tty(STDIN).unwrap_or(true) {
-        shell.run_interpreter()
     } else {
-        let mut input = String::new();
-        let stdin = io::stdin();
-        stdin.lock().read_to_string(&mut input).unwrap();
-        shell.run_command(&input)
+        match is_fd_tty(STDIN) {
+            Err(_) => {
+                // is_fd_tty will fail in WASI runtimes (wasmtime/wasmer/wasiwasm),
+                // just run interpreter then without registreing sigint
+                shell.run_interpreter()
+            }
+            Ok(true) => {
+                #[cfg(target_os = "wasi")]
+                shell
+                    .register_sigint()
+                    .expect("Cannot register InternalEventSource object!");
+                shell.run_interpreter()
+            }
+            Ok(false) => {
+                let mut input = String::new();
+                let stdin = io::stdin();
+                stdin.lock().read_to_string(&mut input).unwrap();
+                shell.run_command(&input)
+            }
+        }
     };
 
     let exit_code = match result {

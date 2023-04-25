@@ -10,12 +10,16 @@ use std::env;
 use std::fs;
 #[cfg(not(target_os = "wasi"))]
 use std::os::unix::prelude::RawFd;
+#[cfg(target_os = "wasi")]
+use std::path::Path;
 use std::path::PathBuf;
 
 use conch_parser::ast;
 use glob::Pattern;
 
-use crate::shell_base::{Redirect, Shell, EXIT_FAILURE, EXIT_SUCCESS, STDIN, STDOUT};
+use crate::shell_base::{
+    Redirect, Shell, EXIT_FAILURE, EXIT_INTERRUPTED, EXIT_SUCCESS, STDIN, STDOUT,
+};
 
 pub fn interpret(shell: &mut Shell, cmd: &ast::TopLevelCommand<String>) -> i32 {
     handle_top_level_command(shell, cmd)
@@ -25,7 +29,6 @@ fn handle_top_level_command(
     shell: &mut Shell,
     top_level_command: &ast::TopLevelCommand<String>,
 ) -> i32 {
-    // println!("{:#?}", cmd);
     match &top_level_command.0 {
         ast::Command::Job(list) => handle_listable_command(shell, list, true),
         ast::Command::List(list) => handle_listable_command(shell, list, false),
@@ -46,6 +49,7 @@ fn handle_listable_command(
 
     for next_cmd in &list.rest {
         match (status_code, next_cmd) {
+            (EXIT_INTERRUPTED, _) => return status_code,
             (EXIT_SUCCESS, ast::AndOr::And(cmd)) => {
                 status_code = match &cmd {
                     ast::ListableCommand::Single(cmd) => {
@@ -83,7 +87,7 @@ fn handle_pipe(
 ) -> i32 {
     #[cfg(target_os = "wasi")]
     let exit_status = {
-        handle_pipeable_command(
+        let mut exit_code = handle_pipeable_command(
             shell,
             &cmds[0],
             background,
@@ -93,7 +97,11 @@ fn handle_pipe(
         );
 
         for (i, cmd) in cmds.iter().enumerate().skip(1).take(cmds.len() - 2) {
-            handle_pipeable_command(
+            if exit_code == EXIT_INTERRUPTED {
+                break;
+            }
+
+            exit_code = handle_pipeable_command(
                 shell,
                 cmd,
                 background,
@@ -104,27 +112,32 @@ fn handle_pipe(
             );
         }
 
-        let exit_status = handle_pipeable_command(
-            shell,
-            cmds.last().unwrap(),
-            background,
-            &mut vec![Redirect::Read((
-                STDIN,
-                format!("/proc/pipe{}.txt", cmds.len() - 2),
-            ))],
-        );
+        if exit_code != EXIT_INTERRUPTED {
+            exit_code = handle_pipeable_command(
+                shell,
+                cmds.last().unwrap(),
+                background,
+                &mut vec![Redirect::Read((
+                    STDIN,
+                    format!("/proc/pipe{}.txt", cmds.len() - 2),
+                ))],
+            );
+        }
 
         // TODO: temporary solution before in-memory files get implemented
         for i in 0..cmds.len() - 1 {
-            fs::remove_file(format!("/proc/pipe{i}.txt")).unwrap();
+            let pipe_name = format!("/proc/pipe{i}.txt");
+            if Path::new(pipe_name.as_str()).exists() {
+                fs::remove_file(pipe_name.as_str()).unwrap();
+            }
         }
-        exit_status
+        exit_code
     };
 
     #[cfg(not(target_os = "wasi"))]
     let exit_status = {
         let (mut reader, mut writer) = os_pipe::pipe().unwrap();
-        handle_pipeable_command(
+        let mut exit_code = handle_pipeable_command(
             shell,
             &cmds[0],
             background,
@@ -132,9 +145,13 @@ fn handle_pipe(
         );
 
         for cmd in cmds.iter().skip(1).take(cmds.len() - 2) {
+            if exit_code == EXIT_INTERRUPTED {
+                break;
+            }
+
             let prev_reader = reader;
             (reader, writer) = os_pipe::pipe().unwrap();
-            handle_pipeable_command(
+            exit_code = handle_pipeable_command(
                 shell,
                 cmd,
                 background,
@@ -145,14 +162,16 @@ fn handle_pipe(
             );
         }
 
-        let exit_status = handle_pipeable_command(
-            shell,
-            cmds.last().unwrap(),
-            background,
-            &mut vec![Redirect::PipeIn(Some(reader))],
-        );
+        if exit_code != EXIT_INTERRUPTED {
+            exit_code = handle_pipeable_command(
+                shell,
+                cmds.last().unwrap(),
+                background,
+                &mut vec![Redirect::PipeIn(Some(reader))],
+            );
+        }
 
-        exit_status
+        exit_code
     };
 
     // if ! was present at the beginning of the pipe, return logical negation of last command status
@@ -202,10 +221,17 @@ fn handle_compound_command(
         ast::CompoundCommandKind::For { var, words, body } => {
             let mut exit_status = EXIT_SUCCESS;
             if let Some(w) = words {
-                for word in w {
-                    env::set_var(var, handle_top_level_word(shell, word).unwrap());
+                let words: Vec<String> = w
+                    .iter()
+                    .filter_map(|word| handle_top_level_word(shell, word))
+                    .collect();
+                for word in words {
+                    env::set_var(var, word);
                     for command in body {
                         exit_status = handle_top_level_command(shell, command);
+                        if exit_status == EXIT_INTERRUPTED {
+                            return exit_status;
+                        }
                     }
                 }
             }
@@ -220,67 +246,85 @@ fn handle_compound_command(
             for guard_body in conditionals {
                 for command in &guard_body.guard {
                     guard_exit = handle_top_level_command(shell, command);
+                    if guard_exit == EXIT_INTERRUPTED {
+                        return guard_exit;
+                    }
                 }
                 if guard_exit == EXIT_SUCCESS {
                     for command in &guard_body.body {
                         exit_status = handle_top_level_command(shell, command);
+                        if exit_status == EXIT_INTERRUPTED {
+                            return exit_status;
+                        }
                     }
                     break;
+                } else {
+                    shell.last_exit_status = EXIT_SUCCESS;
                 }
             }
             if guard_exit != EXIT_SUCCESS {
                 if let Some(els) = else_branch {
                     for command in els {
                         exit_status = handle_top_level_command(shell, command);
+                        if exit_status == EXIT_INTERRUPTED {
+                            return exit_status;
+                        }
                     }
                 }
             };
             exit_status
         }
-        ast::CompoundCommandKind::While(guard_body) => {
-            let mut exit_status = EXIT_SUCCESS;
-            while guard_body
-                .guard
-                .iter()
-                .fold(EXIT_SUCCESS, |_, x| handle_top_level_command(shell, x))
-                == EXIT_SUCCESS
-            {
-                exit_status = guard_body
-                    .body
-                    .iter()
-                    .fold(EXIT_SUCCESS, |_, x| handle_top_level_command(shell, x))
+        ast::CompoundCommandKind::While(guard_body) => loop {
+            let mut guard_status = EXIT_SUCCESS;
+            for cmd in guard_body.guard.iter() {
+                guard_status = handle_top_level_command(shell, cmd);
+                if guard_status == EXIT_INTERRUPTED {
+                    return guard_status;
+                }
             }
-            exit_status
-        }
+
+            if guard_status != EXIT_SUCCESS {
+                shell.last_exit_status = EXIT_SUCCESS;
+                return EXIT_SUCCESS;
+            }
+
+            for cmd in guard_body.body.iter() {
+                let body_status = handle_top_level_command(shell, cmd);
+                if body_status == EXIT_INTERRUPTED {
+                    return body_status;
+                }
+            }
+        },
         ast::CompoundCommandKind::Case { word, arms } => {
             let mut exit_status = EXIT_SUCCESS;
-            if let Some(handled_word) = handle_top_level_word(shell, word) {
-                for arm in arms {
-                    if arm.patterns.iter().any(|pattern| {
-                        if let Some(handled_pattern) = handle_top_level_word(shell, pattern) {
-                            if let Ok(pat) = Pattern::new(&handled_pattern) {
-                                pat.matches(&handled_word)
-                            } else {
-                                // if the pattern contains invalid wildcard, match against literal pattern
-                                // TODO: if there are multiple valid wildcards in the pattern and at least
-                                // one invalid, the pattern will be taken as literal.
-                                // e.g. '[a*' won't match with [abbb
-                                handled_pattern == handled_word
-                            }
+            let handled_word = handle_top_level_word(shell, word).unwrap_or("".to_string());
+            for arm in arms {
+                if arm.patterns.iter().any(|pattern| {
+                    // TODO: Ctrl-C is not handled during processing pattern because `Subst`
+                    // is not handled and we cannot execute any command in pattern
+                    if let Some(handled_pattern) = handle_top_level_word(shell, pattern) {
+                        if let Ok(pat) = Pattern::new(&handled_pattern) {
+                            pat.matches(&handled_word)
                         } else {
-                            false
+                            // if the pattern contains invalid wildcard, match against literal pattern
+                            // TODO: if there are multiple valid wildcards in the pattern and at least
+                            // one invalid, the pattern will be taken as literal.
+                            // e.g. '[a*' won't match with [abbb
+                            handled_pattern == handled_word
                         }
-                    }) {
-                        exit_status = arm
-                            .body
-                            .iter()
-                            .fold(EXIT_SUCCESS, |_, x| handle_top_level_command(shell, x));
-                        break;
+                    } else {
+                        // When command fails then bash try to match handled_word with empty string
+                        handled_word.is_empty()
                     }
+                }) {
+                    for command in arm.body.iter() {
+                        exit_status = handle_top_level_command(shell, command);
+                        if exit_status == EXIT_INTERRUPTED {
+                            return exit_status;
+                        }
+                    }
+                    break;
                 }
-            } else {
-                // if the word could not be matched, exit with failure
-                exit_status = EXIT_FAILURE;
             }
             exit_status
         }
@@ -578,12 +622,18 @@ fn handle_simple_word<'a>(shell: &'a Shell, word: &'a ast::DefaultSimpleWord) ->
                     ""
                 },
             )),
-            any => Some(format!("parameter not yet handled: {any:?}")),
+            any => {
+                eprintln!("parameter not yet handled: {any:?}");
+                None
+            }
         },
         ast::SimpleWord::Star => Some("*".to_string()),
         ast::SimpleWord::Question => Some("?".to_string()),
         ast::SimpleWord::SquareOpen => Some("[".to_string()),
         ast::SimpleWord::SquareClose => Some("]".to_string()),
-        any => Some(format!("simple word not yet handled: {any:?}")),
+        any => {
+            eprintln!("simple word not yet handled: {any:?}");
+            None
+        }
     }
 }
