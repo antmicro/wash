@@ -576,6 +576,13 @@ fn handle_simple_word<'a>(shell: &'a Shell, word: &'a ast::DefaultSimpleWord) ->
         ast::SimpleWord::Colon => Some(":".to_string()),
         ast::SimpleWord::Tilde => Some(env::var("HOME").unwrap()),
         ast::SimpleWord::Param(p) => match p {
+            ast::Parameter::Bang => {
+                if let Some(pid) = shell.last_job_pid {
+                    Some(pid.to_string())
+                } else {
+                    None
+                }
+            }
             ast::Parameter::Var(key) => {
                 if let Some(variable) = shell.vars.get(key) {
                     Some(variable.clone())

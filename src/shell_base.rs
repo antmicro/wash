@@ -109,7 +109,7 @@ pub fn spawn(
     env: &HashMap<String, String>,
     background: bool,
     redirects: &[Redirect],
-) -> Result<i32, i32> {
+) -> Result<(i32, i32), i32> {
     #[cfg(target_os = "wasi")]
     {
         wasi_ext_lib::spawn(
@@ -163,11 +163,12 @@ pub fn spawn(
         }
 
         let mut spawned = child.spawn().unwrap();
+        let child_pid = spawned.id();
 
         if !background {
-            spawned.wait().unwrap().code().unwrap()
+            (spawned.wait().unwrap().code().unwrap(), child_pid as i32)
         } else {
-            EXIT_SUCCESS
+            (EXIT_SUCCESS, child_pid as i32)
         }
     });
 }
@@ -471,6 +472,7 @@ pub struct Shell {
     pub vars: HashMap<String, String>,
     pub args: VecDeque<String>,
     pub last_exit_status: i32,
+    pub last_job_pid: Option<u32>,
     pub history: Vec<String>,
 
     history_path: PathBuf,
@@ -503,6 +505,7 @@ impl Shell {
             }),
             vars: HashMap::new(),
             last_exit_status: EXIT_SUCCESS,
+            last_job_pid: None,
             cursor_position: 0,
             insert_mode: false,
 
@@ -1164,7 +1167,13 @@ impl Shell {
                         args.insert(1, path.into_os_string().into_string().unwrap());
                         let args_: Vec<&str> = args.iter().map(|s| &**s).collect();
                         // TODO: we should not unwrap here
-                        Ok(spawn(args_[0], &args_[1..], env, background, redirects).unwrap())
+                        let (exit_status, child_pid) = spawn(args_[0], &args_[1..], env, background, redirects).unwrap();
+
+                        if background {
+                            self.last_job_pid = Some(child_pid as u32);
+                        }
+
+                        Ok(exit_status)
                     } else {
                         // most likely WASM binary
                         args.insert(0, path.into_os_string().into_string().unwrap());
@@ -1179,7 +1188,12 @@ impl Shell {
                                 ));
                                 Ok(EXIT_FAILURE)
                             }
-                            Ok(e) => Ok(e),
+                            Ok((exit_status, child_pid)) => {
+                                if background {
+                                    self.last_job_pid = Some(child_pid as u32);
+                                }
+                                Ok(exit_status)
+                            },
                         }
                     }
                 }
