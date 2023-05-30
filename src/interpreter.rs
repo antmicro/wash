@@ -14,7 +14,13 @@ use std::os::unix::prelude::RawFd;
 use std::path::Path;
 use std::path::PathBuf;
 
-use conch_parser::ast;
+use conch_parser::ast::{
+    self,
+    TopLevelWord,
+    ComplexWord::Single,
+    SimpleWord::Param,
+    Word::Simple,
+};
 use glob::Pattern;
 
 use crate::shell_base::{
@@ -220,12 +226,31 @@ fn handle_compound_command(
         }
         ast::CompoundCommandKind::For { var, words, body } => {
             let mut exit_status = EXIT_SUCCESS;
-            if let Some(w) = words {
-                let words: Vec<String> = w
-                    .iter()
-                    .filter_map(|word| handle_top_level_word(shell, word))
-                    .collect();
-                for word in words {
+            if let Some(for_list) = words {
+                let mut finall_list: Vec<String> = vec![];
+
+                for word in for_list {
+                    match word {
+                        TopLevelWord(Single(Simple(Param(_)))) => {
+                            if let TopLevelWord(Single(Simple(param_word))) = word {
+                                if let Some(value) = handle_simple_word(shell, param_word) {
+                                    finall_list.append(
+                                        &mut value.split_whitespace()
+                                            .map(|w| String::from(w))
+                                            .collect::<Vec<String>>()
+                                    );
+                                }
+                            }
+                        },
+                        word => {
+                            if let Some(w) = handle_top_level_word(shell, word) {
+                                finall_list.push(w);
+                            }
+                        }
+                    }
+                }
+
+                for word in finall_list {
                     env::set_var(var, word);
                     for command in body {
                         exit_status = handle_top_level_command(shell, command);
