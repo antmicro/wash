@@ -14,13 +14,7 @@ use std::os::unix::prelude::RawFd;
 use std::path::Path;
 use std::path::PathBuf;
 
-use conch_parser::ast::{
-    self,
-    TopLevelWord,
-    ComplexWord::Single,
-    SimpleWord::Param,
-    Word::Simple,
-};
+use conch_parser::ast::{self, ComplexWord::Single, SimpleWord::Param, TopLevelWord, Word::Simple};
 use glob::Pattern;
 
 use crate::shell_base::{
@@ -235,13 +229,14 @@ fn handle_compound_command(
                             if let TopLevelWord(Single(Simple(param_word))) = word {
                                 if let Some(value) = handle_simple_word(shell, param_word) {
                                     finall_list.append(
-                                        &mut value.split_whitespace()
-                                            .map(|w| String::from(w))
-                                            .collect::<Vec<String>>()
+                                        &mut value
+                                            .split_whitespace()
+                                            .map(String::from)
+                                            .collect::<Vec<String>>(),
                                     );
                                 }
                             }
-                        },
+                        }
                         word => {
                             if let Some(w) = handle_top_level_word(shell, word) {
                                 finall_list.push(w);
@@ -601,13 +596,7 @@ fn handle_simple_word<'a>(shell: &'a Shell, word: &'a ast::DefaultSimpleWord) ->
         ast::SimpleWord::Colon => Some(":".to_string()),
         ast::SimpleWord::Tilde => Some(env::var("HOME").unwrap()),
         ast::SimpleWord::Param(p) => match p {
-            ast::Parameter::Bang => {
-                if let Some(pid) = shell.last_job_pid {
-                    Some(pid.to_string())
-                } else {
-                    None
-                }
-            }
+            ast::Parameter::Bang => shell.last_job_pid.map(|pid| pid.to_string()),
             ast::Parameter::Var(key) => {
                 if let Some(variable) = shell.vars.get(key) {
                     Some(variable.clone())

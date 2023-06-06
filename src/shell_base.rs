@@ -1167,7 +1167,8 @@ impl Shell {
                         args.insert(1, path.into_os_string().into_string().unwrap());
                         let args_: Vec<&str> = args.iter().map(|s| &**s).collect();
                         // TODO: we should not unwrap here
-                        let (exit_status, child_pid) = spawn(args_[0], &args_[1..], env, background, redirects).unwrap();
+                        let (exit_status, child_pid) =
+                            spawn(args_[0], &args_[1..], env, background, redirects).unwrap();
 
                         if background {
                             self.last_job_pid = Some(child_pid as u32);
@@ -1193,7 +1194,7 @@ impl Shell {
                                     self.last_job_pid = Some(child_pid as u32);
                                 }
                                 Ok(exit_status)
-                            },
+                            }
                         }
                     }
                 }
