@@ -7,7 +7,7 @@ license = "Apache-2.0"
 
 [dependencies]
 clap = "3"
-conch-parser = "0.1"
+conch-parser = { git = "https://github.com/antmicro/conch-parser.git", branch = "master" }
 color-eyre = "0.5"
 lazy_static = "1"
 regex = "1"

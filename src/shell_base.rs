@@ -7,8 +7,6 @@
 use color_eyre::Report;
 #[cfg(not(target_os = "wasi"))]
 use command_fds::{CommandFdExt, FdMapping};
-use conch_parser::lexer::Lexer;
-use conch_parser::parse::{DefaultParser, ParseError};
 use lazy_static::lazy_static;
 #[cfg(not(target_os = "wasi"))]
 use libc;
@@ -39,7 +37,7 @@ use std::path::PathBuf;
 use wasi;
 
 use crate::internals::INTERNALS_MAP;
-use crate::interpreter::interpret;
+use crate::interpreter::InputInterpreter;
 use crate::output_device::OutputDevice;
 
 type Fd = u16;
@@ -1003,48 +1001,9 @@ impl Shell {
     }
 
     fn handle_input(&mut self, input: &str) -> Result<i32, Report> {
-        let lex = Lexer::new(input.chars());
-        let parser = DefaultParser::new(lex);
-        let mut exit_status = EXIT_SUCCESS;
-        for cmd in parser {
-            exit_status = match cmd {
-                Ok(cmd) => interpret(self, &cmd),
-                Err(e) => {
-                    let err_msg = match e {
-                        /*
-                        TODO: Most of these errors will never occur due to
-                        unimplemented shell features so error messages are
-                        kind of general.
-                        */
-                        ParseError::BadFd(pos_start, pos_end) => {
-                            let idx_start = pos_start.byte;
-                            let idx_end = pos_end.byte;
-                            format!(
-                                "{}: ambiguous redirect",
-                                input[idx_start..idx_end].to_owned()
-                            )
-                        }
-                        ParseError::BadIdent(_, _) => "bad idenftifier".to_string(),
-                        ParseError::BadSubst(_, _) => "bad substitution".to_string(),
-                        ParseError::Unmatched(_, _) => "unmached expression".to_string(),
-                        ParseError::IncompleteCmd(_, _, _, _) => "incomplete command".to_string(),
-                        ParseError::Unexpected(_, _) => "unexpected token".to_string(),
-                        ParseError::UnexpectedEOF => "unexpected end of file".to_string(),
-                        ParseError::Custom(t) => {
-                            format!("custom AST error: {t:?}")
-                        }
-                    };
-                    eprintln!("{}: {}", env!("CARGO_PKG_NAME"), err_msg);
-                    self.last_exit_status = EXIT_FAILURE;
-                    EXIT_FAILURE
-                }
-            };
-            if exit_status == EXIT_INTERRUPTED {
-                break;
-            }
-        }
-        // TODO: pass proper exit status code
-        Ok(exit_status)
+        // TODO: define and use constructor
+        let mut interpreter = InputInterpreter::from_str(input);
+        Ok(interpreter.interpret(self))
     }
 
     pub fn execute_command(
