@@ -8,6 +8,7 @@ use std::collections::HashMap;
 use std::env;
 #[cfg(target_os = "wasi")]
 use std::fs;
+use std::os::fd::AsRawFd;
 #[cfg(not(target_os = "wasi"))]
 use std::os::unix::prelude::RawFd;
 #[cfg(target_os = "wasi")]
@@ -20,8 +21,14 @@ use conch_parser::parse::{DefaultParser, ParseError};
 
 use glob::Pattern;
 
+#[cfg(not(target_os = "wasi"))]
+use nix::{
+    sys::wait::{waitpid, WaitStatus},
+    unistd::{fork, ForkResult}
+};
+
 use crate::shell_base::{
-    Redirect, Shell, EXIT_FAILURE, EXIT_INTERRUPTED, EXIT_SUCCESS, STDIN, STDOUT,
+    Redirect, Shell, EXIT_FAILURE, EXIT_INTERRUPTED, EXIT_SUCCESS, STDIN, STDOUT, STDERR, preprocess_redirects, OpenedFd,
 };
 
 pub struct InputInterpreter<'a> {
@@ -265,18 +272,18 @@ impl<'a> InputInterpreter<'a> {
         &self,
         shell: &mut Shell,
         cmd: &ast::DefaultCompoundCommand,
-        _background: bool,
+        background: bool,
         redirects: &mut Vec<Redirect>,
     ) -> i32 {
         let ast::CompoundCommand { kind, io } = cmd;
+        for redirect_type in io {
+            if let Some(redirect) = self.handle_redirect_type(shell, redirect_type) {
+                redirects.push(redirect);
+            }
+        }
         match kind {
+            #[cfg(target_os = "wasi")]
             ast::CompoundCommandKind::Subshell { body: _, start_pos, end_pos } => {
-                for redirect_type in io {
-                    if let Some(redirect) = self.handle_redirect_type(shell, redirect_type) {
-                        redirects.push(redirect);
-                    }
-                }
-
                 let subshell_cmds = &self.input[(start_pos.byte+1)..(end_pos.byte)];
 
                 let mut args_vec = vec![
@@ -284,7 +291,6 @@ impl<'a> InputInterpreter<'a> {
                     subshell_cmds.to_string(),
                 ];
 
-                // TODO: Maybe better run fork for x86 target?
                 match shell.execute_command(
                     "wash",
                     &mut args_vec,
@@ -297,6 +303,63 @@ impl<'a> InputInterpreter<'a> {
                         eprintln!("{} error: {:?}", env!("CARGO_PKG_NAME"), error);
                         EXIT_FAILURE
                     }
+                }
+            }
+            #[cfg(not(target_os = "wasi"))]
+            ast::CompoundCommandKind::Subshell { body, start_pos: _, end_pos: _ } => {
+                match unsafe{fork()} {
+                    Ok(ForkResult::Parent { child }) => {
+                        let mut exit_status = EXIT_SUCCESS;
+                        if !background {
+                            let wait_status = waitpid(child, None)
+                                .expect(&format!("{}: waitpid for subshell command error", env!("CARGO_PKG_NAME")));
+
+                            loop {
+                                match wait_status {
+                                    WaitStatus::Exited(waited_pid, exit_code) if waited_pid == child => {
+                                        exit_status = exit_code;
+                                        break;
+                                    },
+                                    WaitStatus::Exited(_, _) => { continue; },
+                                    _ => unreachable!(),
+                                }
+                            }
+                        }
+                        exit_status
+                    }
+                    Ok(ForkResult::Child) => {
+                        let (opened_fds, status) = preprocess_redirects(redirects);
+                        if let Err(e) = status {
+                            eprintln!("{}: {}", env!("CARGO_PKG_NAME"), e);
+                            return EXIT_FAILURE;
+                        }
+
+                        for (fd, target) in  opened_fds.iter() {
+                            let (source, target) = match target {
+                                OpenedFd::File { file, writable: _ } => (file.as_raw_fd(), *fd),
+                                OpenedFd::PipeReader(pipe) => (pipe.as_raw_fd(), *fd),
+                                OpenedFd::PipeWriter(pipe) => (pipe.as_raw_fd(), *fd),
+                                OpenedFd::StdIn => (STDIN as i32, *fd),
+                                OpenedFd::StdOut => (STDOUT as i32, *fd),
+                                OpenedFd::StdErr => (STDERR as i32, *fd),
+                            };
+                            unsafe { libc::dup2(source, target); }
+                        }
+
+                        let mut exit_status = EXIT_SUCCESS;
+
+                        for subshell_cmd in body {
+                            exit_status = self.handle_top_level_command(shell, subshell_cmd);
+                            if exit_status == EXIT_INTERRUPTED {
+                                break;
+                            }
+                        }
+                        unsafe { libc::_exit(exit_status) };
+                    }
+                    Err(_) => {
+                        eprintln!("{} error: subshell fork failed", env!("CARGO_PKG_NAME"));
+                        EXIT_FAILURE
+                    },
                 }
             }
             ast::CompoundCommandKind::For { var, words, body } => {
