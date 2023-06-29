@@ -8,6 +8,7 @@ use std::collections::HashMap;
 use std::env;
 #[cfg(target_os = "wasi")]
 use std::fs;
+#[cfg(not(target_os = "wasi"))]
 use std::os::fd::AsRawFd;
 #[cfg(not(target_os = "wasi"))]
 use std::os::unix::prelude::RawFd;
@@ -28,7 +29,12 @@ use nix::{
 };
 
 use crate::shell_base::{
-    Redirect, Shell, EXIT_FAILURE, EXIT_INTERRUPTED, EXIT_SUCCESS, STDIN, STDOUT, STDERR, preprocess_redirects, OpenedFd,
+    Redirect, Shell, EXIT_FAILURE, EXIT_INTERRUPTED, EXIT_SUCCESS, STDIN, STDOUT
+};
+
+#[cfg(not(target_os = "wasi"))]
+use crate::shell_base::{
+    STDERR, preprocess_redirects, OpenedFd,
 };
 
 pub struct InputInterpreter<'a> {
@@ -295,7 +301,7 @@ impl<'a> InputInterpreter<'a> {
                     "wash",
                     &mut args_vec,
                     &HashMap::new(),
-                    _background,
+                    background,
                     redirects
                 ) {
                     Ok(result) => result,
@@ -307,7 +313,7 @@ impl<'a> InputInterpreter<'a> {
             }
             #[cfg(not(target_os = "wasi"))]
             ast::CompoundCommandKind::Subshell { body, start_pos: _, end_pos: _ } => {
-                match unsafe{fork()} {
+                match unsafe{ fork() } {
                     Ok(ForkResult::Parent { child }) => {
                         let mut exit_status = EXIT_SUCCESS;
                         if !background {
@@ -328,10 +334,11 @@ impl<'a> InputInterpreter<'a> {
                         exit_status
                     }
                     Ok(ForkResult::Child) => {
+                        // Apply all redirects passed to subshell
                         let (opened_fds, status) = preprocess_redirects(redirects);
                         if let Err(e) = status {
                             eprintln!("{}: {}", env!("CARGO_PKG_NAME"), e);
-                            return EXIT_FAILURE;
+                            std::process::exit(EXIT_FAILURE);
                         }
 
                         for (fd, target) in  opened_fds.iter() {
@@ -343,21 +350,26 @@ impl<'a> InputInterpreter<'a> {
                                 OpenedFd::StdOut => (STDOUT as i32, *fd),
                                 OpenedFd::StdErr => (STDERR as i32, *fd),
                             };
-                            unsafe { libc::dup2(source, target); }
+                            if source != target { unsafe {
+                                libc::dup2(source, target);
+                                libc::close(source);
+                            }}
                         }
 
                         let mut exit_status = EXIT_SUCCESS;
 
+                        // Run subshell commands
                         for subshell_cmd in body {
                             exit_status = self.handle_top_level_command(shell, subshell_cmd);
                             if exit_status == EXIT_INTERRUPTED {
                                 break;
                             }
                         }
-                        unsafe { libc::_exit(exit_status) };
+
+                        std::process::exit(exit_status);
                     }
-                    Err(_) => {
-                        eprintln!("{} error: subshell fork failed", env!("CARGO_PKG_NAME"));
+                    Err(err) => {
+                        eprintln!("{} error: subshell fork failed: {}", env!("CARGO_PKG_NAME"), err);
                         EXIT_FAILURE
                     },
                 }
