@@ -363,10 +363,10 @@ impl<'a> InputInterpreter<'a> {
                                 OpenedFd::StdErr => (STDERR as i32, *fd),
                             };
                             if source != target {
-                                unsafe {
-                                    libc::dup2(source, target);
-                                    libc::close(source);
-                                }
+                                nix::unistd::dup2(source, target)
+                                    .expect("Cannot duplicate fd before subshell execution!");
+                                nix::unistd::close(source)
+                                    .expect("Cannot duplicate fd before subshell execution!");
                             }
                         }
 

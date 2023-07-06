@@ -9,7 +9,7 @@ use color_eyre::Report;
 use command_fds::{CommandFdExt, FdMapping};
 use lazy_static::lazy_static;
 #[cfg(not(target_os = "wasi"))]
-use libc;
+use nix;
 #[cfg(not(target_os = "wasi"))]
 use os_pipe::{PipeReader, PipeWriter};
 use regex::Regex;
@@ -154,7 +154,7 @@ pub fn spawn(
         unsafe {
             child.pre_exec(move || {
                 for fd in fds_to_close.iter() {
-                    libc::close(*fd);
+                    nix::unistd::close(*fd).expect("Cannot close fd before exec!");
                 }
                 Ok(())
             });
@@ -316,7 +316,12 @@ pub fn preprocess_redirects(
                         }
                     }
                 } else {
-                    return (fd_redirects, Err(io::Error::from_raw_os_error(libc::EBADF)));
+                    return (
+                        fd_redirects,
+                        Err(io::Error::from_raw_os_error(
+                            nix::errno::Errno::EBADF as i32,
+                        )),
+                    );
                 }
             }
             Redirect::Close(fd) => {
@@ -523,13 +528,9 @@ impl Shell {
         fn get_hostname() -> String {
             #[cfg(not(target_os = "wasi"))]
             {
-                let mut name: libc::utsname = unsafe { std::mem::zeroed() };
-                let ret = unsafe { libc::uname(&mut name) };
-
-                if ret == 0 {
+                if let Ok(name) = nix::sys::utsname::uname() {
                     return unsafe {
-                        String::from_utf8_lossy(std::mem::transmute(name.nodename.as_ref()))
-                            .into_owned()
+                        String::from_utf8_lossy(std::mem::transmute(name.nodename())).into_owned()
                     };
                 }
             }

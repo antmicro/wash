@@ -172,7 +172,11 @@ impl OutputDevice {
     fn flush_fd(&mut self, to_fd: u16, output: &str) -> Result<(), Report> {
         let out_obj = match self.redirects.get_mut(&(to_fd as RawFd)) {
             Some(o) => o,
-            None => return Err(Report::new(std::io::Error::from_raw_os_error(libc::EBADF))),
+            None => {
+                return Err(Report::new(std::io::Error::from_raw_os_error(
+                    nix::errno::Errno::EBADF as i32,
+                )))
+            }
         };
         match out_obj {
             OpenedFd::File {
