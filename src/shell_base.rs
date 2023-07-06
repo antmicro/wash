@@ -182,7 +182,9 @@ pub fn path_exists(path: &str) -> io::Result<bool> {
 }
 
 #[cfg(not(target_os = "wasi"))]
-pub fn preprocess_redirects(redirects: &mut [Redirect]) -> (HashMap<RawFd, OpenedFd>, io::Result<()>) {
+pub fn preprocess_redirects(
+    redirects: &mut [Redirect],
+) -> (HashMap<RawFd, OpenedFd>, io::Result<()>) {
     let mut fd_redirects = HashMap::from([
         (STDIN as RawFd, OpenedFd::StdIn),
         (STDOUT as RawFd, OpenedFd::StdOut),
@@ -1002,7 +1004,7 @@ impl Shell {
 
     fn handle_input(&mut self, input: &str) -> Result<i32, Report> {
         // TODO: define and use constructor
-        let mut interpreter = InputInterpreter::from_str(input);
+        let mut interpreter = InputInterpreter::from_input(input);
         Ok(interpreter.interpret(self))
     }
 

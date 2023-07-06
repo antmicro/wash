@@ -25,25 +25,22 @@ use glob::Pattern;
 #[cfg(not(target_os = "wasi"))]
 use nix::{
     sys::wait::{waitpid, WaitStatus},
-    unistd::{fork, ForkResult}
+    unistd::{fork, ForkResult},
 };
 
 use crate::shell_base::{
-    Redirect, Shell, EXIT_FAILURE, EXIT_INTERRUPTED, EXIT_SUCCESS, STDIN, STDOUT
+    Redirect, Shell, EXIT_FAILURE, EXIT_INTERRUPTED, EXIT_SUCCESS, STDIN, STDOUT,
 };
 
 #[cfg(not(target_os = "wasi"))]
-use crate::shell_base::{
-    STDERR, preprocess_redirects, OpenedFd,
-};
+use crate::shell_base::{preprocess_redirects, OpenedFd, STDERR};
 
 pub struct InputInterpreter<'a> {
     input: &'a str,
 }
 
-
 impl<'a> InputInterpreter<'a> {
-    pub fn from_str(input: &str) -> InputInterpreter {
+    pub fn from_input(input: &str) -> InputInterpreter {
         InputInterpreter { input }
     }
 
@@ -114,7 +111,9 @@ impl<'a> InputInterpreter<'a> {
             ast::ListableCommand::Single(cmd) => {
                 self.handle_pipeable_command(shell, cmd, background, &mut Vec::new())
             }
-            ast::ListableCommand::Pipe(negate, cmds) => self.handle_pipe(shell, *negate, cmds, background),
+            ast::ListableCommand::Pipe(negate, cmds) => {
+                self.handle_pipe(shell, *negate, cmds, background)
+            }
         };
 
         for next_cmd in &list.rest {
@@ -289,20 +288,21 @@ impl<'a> InputInterpreter<'a> {
         }
         match kind {
             #[cfg(target_os = "wasi")]
-            ast::CompoundCommandKind::Subshell { body: _, start_pos, end_pos } => {
-                let subshell_cmds = &self.input[(start_pos.byte+1)..(end_pos.byte)];
+            ast::CompoundCommandKind::Subshell {
+                body: _,
+                start_pos,
+                end_pos,
+            } => {
+                let subshell_cmds = &self.input[(start_pos.byte + 1)..(end_pos.byte)];
 
-                let mut args_vec = vec![
-                    "-c".to_string(),
-                    subshell_cmds.to_string(),
-                ];
+                let mut args_vec = vec!["-c".to_string(), subshell_cmds.to_string()];
 
                 match shell.execute_command(
                     "wash",
                     &mut args_vec,
                     &HashMap::new(),
                     background,
-                    redirects
+                    redirects,
                 ) {
                     Ok(result) => result,
                     Err(error) => {
@@ -312,21 +312,33 @@ impl<'a> InputInterpreter<'a> {
                 }
             }
             #[cfg(not(target_os = "wasi"))]
-            ast::CompoundCommandKind::Subshell { body, start_pos: _, end_pos: _ } => {
-                match unsafe{ fork() } {
+            ast::CompoundCommandKind::Subshell {
+                body,
+                start_pos: _,
+                end_pos: _,
+            } => {
+                match unsafe { fork() } {
                     Ok(ForkResult::Parent { child }) => {
                         let mut exit_status = EXIT_SUCCESS;
                         if !background {
-                            let wait_status = waitpid(child, None)
-                                .expect(&format!("{}: waitpid for subshell command error", env!("CARGO_PKG_NAME")));
+                            let wait_status = waitpid(child, None).unwrap_or_else(|_| {
+                                panic!(
+                                    "{}: waitpid for subshell command error",
+                                    env!("CARGO_PKG_NAME")
+                                )
+                            });
 
                             loop {
                                 match wait_status {
-                                    WaitStatus::Exited(waited_pid, exit_code) if waited_pid == child => {
+                                    WaitStatus::Exited(waited_pid, exit_code)
+                                        if waited_pid == child =>
+                                    {
                                         exit_status = exit_code;
                                         break;
-                                    },
-                                    WaitStatus::Exited(_, _) => { continue; },
+                                    }
+                                    WaitStatus::Exited(_, _) => {
+                                        continue;
+                                    }
                                     _ => unreachable!(),
                                 }
                             }
@@ -341,7 +353,7 @@ impl<'a> InputInterpreter<'a> {
                             std::process::exit(EXIT_FAILURE);
                         }
 
-                        for (fd, target) in  opened_fds.iter() {
+                        for (fd, target) in opened_fds.iter() {
                             let (source, target) = match target {
                                 OpenedFd::File { file, writable: _ } => (file.as_raw_fd(), *fd),
                                 OpenedFd::PipeReader(pipe) => (pipe.as_raw_fd(), *fd),
@@ -350,10 +362,12 @@ impl<'a> InputInterpreter<'a> {
                                 OpenedFd::StdOut => (STDOUT as i32, *fd),
                                 OpenedFd::StdErr => (STDERR as i32, *fd),
                             };
-                            if source != target { unsafe {
-                                libc::dup2(source, target);
-                                libc::close(source);
-                            }}
+                            if source != target {
+                                unsafe {
+                                    libc::dup2(source, target);
+                                    libc::close(source);
+                                }
+                            }
                         }
 
                         let mut exit_status = EXIT_SUCCESS;
@@ -369,9 +383,13 @@ impl<'a> InputInterpreter<'a> {
                         std::process::exit(exit_status);
                     }
                     Err(err) => {
-                        eprintln!("{} error: subshell fork failed: {}", env!("CARGO_PKG_NAME"), err);
+                        eprintln!(
+                            "{} error: subshell fork failed: {}",
+                            env!("CARGO_PKG_NAME"),
+                            err
+                        );
                         EXIT_FAILURE
-                    },
+                    }
                 }
             }
             ast::CompoundCommandKind::For { var, words, body } => {
@@ -383,15 +401,17 @@ impl<'a> InputInterpreter<'a> {
                         match word {
                             TopLevelWord(Single(Simple(Param(_)))) => {
                                 if let TopLevelWord(Single(Simple(param_word))) = word {
-                                    if let Some(value) = self.handle_simple_word(shell, param_word) {
+                                    if let Some(value) = self.handle_simple_word(shell, param_word)
+                                    {
                                         finall_list.append(
-                                            &mut value.split_whitespace()
-                                                .map(|w| String::from(w))
-                                                .collect::<Vec<String>>()
+                                            &mut value
+                                                .split_whitespace()
+                                                .map(String::from)
+                                                .collect::<Vec<String>>(),
                                         );
                                     }
                                 }
-                            },
+                            }
                             word => {
                                 if let Some(w) = self.handle_top_level_word(shell, word) {
                                     finall_list.push(w);
@@ -472,7 +492,9 @@ impl<'a> InputInterpreter<'a> {
             },
             ast::CompoundCommandKind::Case { word, arms } => {
                 let mut exit_status = EXIT_SUCCESS;
-                let handled_word = self.handle_top_level_word(shell, word).unwrap_or("".to_string());
+                let handled_word = self
+                    .handle_top_level_word(shell, word)
+                    .unwrap_or("".to_string());
                 for arm in arms {
                     if arm.patterns.iter().any(|pattern| {
                         // TODO: Ctrl-C is not handled during processing pattern because `Subst`
@@ -754,13 +776,7 @@ impl<'a> InputInterpreter<'a> {
             ast::SimpleWord::Colon => Some(":".to_string()),
             ast::SimpleWord::Tilde => Some(env::var("HOME").unwrap()),
             ast::SimpleWord::Param(p) => match p {
-                ast::Parameter::Bang => {
-                    if let Some(pid) = shell.last_job_pid {
-                        Some(pid.to_string())
-                    } else {
-                        None
-                    }
-                }
+                ast::Parameter::Bang => shell.last_job_pid.map(|pid| pid.to_string()),
                 ast::Parameter::Var(key) => {
                     if let Some(variable) = shell.vars.get(key) {
                         Some(variable.clone())
