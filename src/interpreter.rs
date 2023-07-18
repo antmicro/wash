@@ -7,10 +7,11 @@
 use std::collections::HashMap;
 use std::env;
 #[cfg(target_os = "wasi")]
-use std::fs::{self, File, OpenOptions};
+use std::fs::{self, OpenOptions};
+#[cfg(target_os = "wasi")]
+use std::os::fd::{RawFd, IntoRawFd};
 #[cfg(not(target_os = "wasi"))]
 use std::os::fd::AsRawFd;
-use std::os::fd::{RawFd, AsRawFd, AsFd, IntoRawFd};
 #[cfg(not(target_os = "wasi"))]
 use std::os::unix::prelude::RawFd;
 #[cfg(target_os = "wasi")]
@@ -35,6 +36,11 @@ use crate::shell_base::{
 
 #[cfg(not(target_os = "wasi"))]
 use crate::shell_base::{preprocess_redirects, OpenedFd, STDERR};
+
+enum SavedFd {
+    Move { src_fd: RawFd, dst_fd: RawFd },
+    Close { fd: RawFd },
+}
 
 pub struct InputInterpreter<'a> {
     input: &'a str,
@@ -315,23 +321,24 @@ impl<'a> InputInterpreter<'a> {
         }
 
         // fds_to_restore[i] = (src_fd, dst_fd); src_fd shoulde be greater than 9
-        let mut fds_to_restore: Vec<(RawFd, RawFd)> = Vec::new();
+        let mut fds_to_restore: Vec<SavedFd> = Vec::new();
 
         for redirect_type in io {
             let redirect = if let Some(redirect) = self.handle_redirect_type(shell, redirect_type) {
                 redirect
             } else {
-                // break command execution
-                break;
+                eprintln!("{}: cannot handle redirect!", env!("CARGO_PKG_NAME"));
+                return EXIT_FAILURE;
             };
 
-            let (dst_fd, open_res) = match redirect {
+            let (dst_fd, open_res, path) = match redirect {
                 Redirect::Read((fd, path)) => {
                     (
                         fd as i32,
                         OpenOptions::new()
                             .read(true)
-                            .open(path)
+                            .open(&path),
+                        path
                     )
                 }
                 Redirect::Write((fd, path)) => {
@@ -341,7 +348,8 @@ impl<'a> InputInterpreter<'a> {
                             .write(true)
                             .truncate(true)
                             .create(true)
-                            .open(path)
+                            .open(&path),
+                        path
                     )
                 }
                 Redirect::Append((fd, path)) => {
@@ -351,16 +359,21 @@ impl<'a> InputInterpreter<'a> {
                             .write(true)
                             .append(true)
                             .create(true)
-                            .open(path)
+                            .open(&path),
+                        path
                     )
                 }
             };
 
-            let opened_fd = if let Ok(file) = open_res {
-                // After this line, user is responsible for closing fd
-                file.into_raw_fd()
-            } else {
-                panic!("Cannot open file!");
+            let opened_fd = match open_res {
+                Ok(file) => {
+                    // After this line, user is responsible for closing fd
+                    file.into_raw_fd()  
+                }, 
+                Err(err) => {
+                    eprintln!("{}: {}: {}", env!("CARGO_PKG_NAME"), path, err);
+                    return EXIT_FAILURE;
+                }
             };
 
             match unsafe { wasi::fd_fdstat_get(dst_fd as u32) } {
@@ -371,32 +384,29 @@ impl<'a> InputInterpreter<'a> {
                     wasi_ext_lib::FcntlCommand::F_MVFD { min_fd_num: 10 }
                     ) {
                         Ok(saved_fd) => {
-                            fds_to_restore.push((saved_fd, dst_fd));
+                            fds_to_restore.push(SavedFd::Move { src_fd: saved_fd, dst_fd });
                         },
-                        Err(_err) => {
-                            panic!("fcntl error!")
+                        Err(err) => {
+                            panic!("{}: fcntl: {}", env!("CARGO_PKG_NAME"), err)
                         }
                     }
                 }
                 Ok(_) => {
-                    // case when file was already opened on dst_fd, skip fd_renumber
-                    // TODO: write it better
-                    fds_to_restore.push((-1, dst_fd));
+                    // Case when file is already opened on dst_fd, skip fd_renumber
+                    fds_to_restore.push(SavedFd::Close { fd: dst_fd });
                     continue;
                 }
                 Err(wasi::ERRNO_BADF) => {
-                    // We can make redirect without moving fd
-                    // TODO: write it better
-                    fds_to_restore.push((-1, dst_fd));
+                    // We can make redirect without saving fd
+                    fds_to_restore.push(SavedFd::Close { fd: dst_fd });
                 }
-                Err(_err) => {
-                    panic!("fd_fdstat_get error!")
+                Err(err) => {
+                    panic!("{}: fd_fdstat_get: {}", env!("CARGO_PKG_NAME"), err)
                 }
             }
 
             if let Err(err) = unsafe { wasi::fd_renumber(opened_fd as u32, dst_fd as u32) } {
-                //TODO: break the execution?
-                panic!("fd_renumber error: {}", err)
+                panic!("{}: fd_renumber: {}", env!("CARGO_PKG_NAME"), err)
             }
         }
 
@@ -628,15 +638,18 @@ impl<'a> InputInterpreter<'a> {
         };
 
         // restore saved fds in reversed order
-        for (src_fd, dst_fd) in fds_to_restore.into_iter().rev() {
-            // fd_renumber closes dst_fd so we do not need to make any additional action
-            if src_fd < 0 {
-                if let Err(err) = unsafe { wasi::fd_close(dst_fd as u32) } {
-                    panic!("fd_close error: {}", err);
+        for saved_fd in fds_to_restore.into_iter().rev() {
+            match saved_fd {
+                SavedFd::Move { src_fd, dst_fd } => {
+                    if let Err(err) = unsafe { wasi::fd_renumber(src_fd as u32, dst_fd as u32) } {
+                        panic!("{}: fd_renumber: {}", env!("CARGO_PKG_NAME"), err)
+                    }
                 }
-            } else if let Err(err) = unsafe { wasi::fd_renumber(src_fd as u32, dst_fd as u32) } {
-                //TODO: break the execution?
-                panic!("fd_renumber error: {}", err);
+                SavedFd::Close { fd } => {
+                    if let Err(err) = unsafe { wasi::fd_close(fd as u32) } {
+                        panic!("{}: fd_close: {}", env!("CARGO_PKG_NAME"), err)
+                    }
+                }
             }
         }
 
