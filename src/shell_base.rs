@@ -40,7 +40,10 @@ use crate::internals::INTERNALS_MAP;
 use crate::interpreter::InputInterpreter;
 use crate::output_device::OutputDevice;
 
-type Fd = u16;
+#[cfg(target_os = "wasi")]
+pub type Fd = wasi::Fd;
+#[cfg(not(target_os = "wasi"))]
+pub type Fd = std::os::fd::RawFd;
 type SerializedPath = String;
 
 pub const EXIT_SUCCESS: i32 = 0;
@@ -60,12 +63,16 @@ enum HistoryExpansion {
     Unchanged,
 }
 
-#[cfg(target_os = "wasi")]
 #[derive(Debug, Clone)]
 pub enum Redirect {
     Read((Fd, SerializedPath)),
     Write((Fd, SerializedPath)),
     Append((Fd, SerializedPath)),
+    ReadWrite((Fd, SerializedPath)),
+    PipeIn(Fd),
+    PipeOut(Fd),
+    Duplicate { fd_src: Fd, fd_dst: Fd },
+    Close(Fd),
 }
 
 #[cfg(target_os = "wasi")]
@@ -74,31 +81,8 @@ fn as_ext_redirect(r: &Redirect) -> wasi_ext_lib::Redirect {
         Redirect::Read((fd, path)) => wasi_ext_lib::Redirect::Read((*fd as u32, path)),
         Redirect::Write((fd, path)) => wasi_ext_lib::Redirect::Write((*fd as u32, path)),
         Redirect::Append((fd, path)) => wasi_ext_lib::Redirect::Append((*fd as u32, path)),
+        _ => panic!() // TODO
     }
-}
-
-#[cfg(not(target_os = "wasi"))]
-#[derive(Debug)]
-pub enum Redirect {
-    Read((RawFd, SerializedPath)),
-    Write((RawFd, SerializedPath)),
-    Append((RawFd, SerializedPath)),
-    ReadWrite((RawFd, SerializedPath)),
-    PipeIn(Option<PipeReader>),
-    PipeOut(Option<PipeWriter>),
-    Duplicate((RawFd, RawFd)),
-    Close(RawFd),
-}
-
-#[cfg(not(target_os = "wasi"))]
-#[derive(Debug)]
-pub enum OpenedFd {
-    File { file: File, writable: bool },
-    PipeReader(PipeReader),
-    PipeWriter(PipeWriter),
-    StdIn,
-    StdOut,
-    StdErr,
 }
 
 pub fn spawn(

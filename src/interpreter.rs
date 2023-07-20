@@ -31,15 +31,15 @@ use nix::{
 };
 
 use crate::shell_base::{
-    Redirect, Shell, EXIT_FAILURE, EXIT_INTERRUPTED, EXIT_SUCCESS, STDIN, STDOUT,
+    Fd, Redirect, Shell, EXIT_FAILURE, EXIT_INTERRUPTED, EXIT_SUCCESS, STDIN, STDOUT,
 };
 
 #[cfg(not(target_os = "wasi"))]
 use crate::shell_base::{preprocess_redirects, OpenedFd, STDERR};
 
 enum SavedFd {
-    Move { src_fd: RawFd, dst_fd: RawFd },
-    Close { fd: RawFd },
+    Move { src_fd: Fd, dst_fd: Fd },
+    Close { fd: Fd },
 }
 
 pub struct InputInterpreter<'a> {
@@ -164,13 +164,34 @@ impl<'a> InputInterpreter<'a> {
     ) -> i32 {
         #[cfg(target_os = "wasi")]
         let exit_status = {
+            #[cfg(target_os = "wasi")]
+            let (mut fd_reader, mut fd_writer) = {
+                // TODO: name of the virtual file should be uniquely generated
+                // TODO: add virtual mode that won't create files but in-memory strings
+                let in_end = OpenOptions::new()
+                    .write(true)
+                    .truncate(true)
+                    .create(true)
+                    .open("/proc/pipe0.txt")
+                    .expect("Cannot create pipe");
+                let out_end = OpenOptions::new()
+                    .read(true)
+                    .open("/proc/pipe0.txt")
+                    .expect("Cannot create pipe");
+
+                (in_end.into_raw_fd() as Fd, out_end.into_raw_fd() as Fd)
+            };
+
+            #[cfg(not(target_os = "wasi"))]
+            let (mut reader, mut writer) = {
+                os_pipe::pipe().unwrap()
+            };
+
             let mut exit_code = self.handle_pipeable_command(
                 shell,
                 &cmds[0],
                 background,
-                // TODO: name of the virtual file should be uniquely generated
-                // TODO: add virtual mode that won't create files but in-memory strings
-                &mut vec![Redirect::Write((STDOUT, "/proc/pipe0.txt".to_string()))],
+                &mut vec![Redirect::PipeOut(fd_reader)],
             );
 
             for (i, cmd) in cmds.iter().enumerate().skip(1).take(cmds.len() - 2) {
@@ -178,13 +199,41 @@ impl<'a> InputInterpreter<'a> {
                     break;
                 }
 
+                let prev_fd_reader = fd_reader;
+
+                (fd_reader, fd_writer) = {
+                    #[cfg(target_os = "wasi")]
+                    {
+                        unsafe {
+                            wasi::fd_close(fd_writer)
+                        }.expect("Cannot close pipe!");
+
+                        let in_end = OpenOptions::new()
+                            .write(true)
+                            .truncate(true)
+                            .create(true)
+                            .open(format!("/proc/pipe{}.txt", i - 1))
+                            .expect("Cannot create pipe");
+                        let out_end = OpenOptions::new()
+                            .read(true)
+                            .open(format!("/proc/pipe{i}.txt"))
+                            .expect("Cannot create pipe");
+
+                        (in_end.into_raw_fd() as Fd, out_end.into_raw_fd() as Fd)
+                    }
+
+                    #[cfg(not(target_os = "wasi"))]
+                    //TODO: close previous pipe write
+                    os_pipe::pipe().unwrap()
+                };
+
                 exit_code = self.handle_pipeable_command(
                     shell,
                     cmd,
                     background,
                     &mut vec![
-                        Redirect::Read((STDIN, format!("/proc/pipe{}.txt", i - 1))),
-                        Redirect::Write((STDOUT, format!("/proc/pipe{i}.txt"))),
+                        Redirect::PipeIn(prev_fd_reader),
+                        Redirect::PipeOut(fd_writer),
                     ],
                 );
             }
@@ -194,60 +243,20 @@ impl<'a> InputInterpreter<'a> {
                     shell,
                     cmds.last().unwrap(),
                     background,
-                    &mut vec![Redirect::Read((
-                        STDIN,
-                        format!("/proc/pipe{}.txt", cmds.len() - 2),
-                    ))],
+                    &mut vec![
+                        Redirect::PipeIn(fd_reader)
+                    ],
                 );
             }
 
             // TODO: temporary solution before in-memory files get implemented
+            #[cfg(target_os = "wasi")]
             for i in 0..cmds.len() - 1 {
                 let pipe_name = format!("/proc/pipe{i}.txt");
                 if Path::new(pipe_name.as_str()).exists() {
                     fs::remove_file(pipe_name.as_str()).unwrap();
                 }
             }
-            exit_code
-        };
-
-        #[cfg(not(target_os = "wasi"))]
-        let exit_status = {
-            let (mut reader, mut writer) = os_pipe::pipe().unwrap();
-            let mut exit_code = self.handle_pipeable_command(
-                shell,
-                &cmds[0],
-                background,
-                &mut vec![Redirect::PipeOut(Some(writer))],
-            );
-
-            for cmd in cmds.iter().skip(1).take(cmds.len() - 2) {
-                if exit_code == EXIT_INTERRUPTED {
-                    break;
-                }
-
-                let prev_reader = reader;
-                (reader, writer) = os_pipe::pipe().unwrap();
-                exit_code = self.handle_pipeable_command(
-                    shell,
-                    cmd,
-                    background,
-                    &mut vec![
-                        Redirect::PipeIn(Some(prev_reader)),
-                        Redirect::PipeOut(Some(writer)),
-                    ],
-                );
-            }
-
-            if exit_code != EXIT_INTERRUPTED {
-                exit_code = self.handle_pipeable_command(
-                    shell,
-                    cmds.last().unwrap(),
-                    background,
-                    &mut vec![Redirect::PipeIn(Some(reader))],
-                );
-            }
-
             exit_code
         };
 
@@ -320,6 +329,88 @@ impl<'a> InputInterpreter<'a> {
             }
         }
 
+        #[cfg(not(target_os = "wasi"))]
+        if let ast::CompoundCommandKind::Subshell {
+            body,
+            start_pos: _,
+            end_pos: _,
+        } = kind {
+            match unsafe { fork() } {
+                Ok(ForkResult::Parent { child }) => {
+                    let mut exit_status = EXIT_SUCCESS;
+                    if !background {
+                        let wait_status = waitpid(child, None).unwrap_or_else(|_| {
+                            panic!(
+                                "{}: waitpid for subshell command error",
+                                env!("CARGO_PKG_NAME")
+                            )
+                        });
+
+                        loop {
+                            match wait_status {
+                                WaitStatus::Exited(waited_pid, exit_code)
+                                    if waited_pid == child =>
+                                {
+                                    exit_status = exit_code;
+                                    break;
+                                }
+                                WaitStatus::Exited(_, _) => {
+                                    continue;
+                                }
+                                _ => unreachable!(),
+                            }
+                        }
+                    }
+                    exit_status
+                }
+                Ok(ForkResult::Child) => {
+                    // Apply all redirects passed to subshell
+                    let (opened_fds, status) = preprocess_redirects(redirects);
+                    if let Err(e) = status {
+                        eprintln!("{}: {}", env!("CARGO_PKG_NAME"), e);
+                        std::process::exit(EXIT_FAILURE);
+                    }
+
+                    for (fd, target) in opened_fds.iter() {
+                        let (source, target) = match target {
+                            OpenedFd::File { file, writable: _ } => (file.as_raw_fd(), *fd),
+                            OpenedFd::PipeReader(pipe) => (pipe.as_raw_fd(), *fd),
+                            OpenedFd::PipeWriter(pipe) => (pipe.as_raw_fd(), *fd),
+                            OpenedFd::StdIn => (STDIN as i32, *fd),
+                            OpenedFd::StdOut => (STDOUT as i32, *fd),
+                            OpenedFd::StdErr => (STDERR as i32, *fd),
+                        };
+                        if source != target {
+                            nix::unistd::dup2(source, target)
+                                .expect("Cannot duplicate fd before subshell execution!");
+                            nix::unistd::close(source)
+                                .expect("Cannot duplicate fd before subshell execution!");
+                        }
+                    }
+
+                    let mut exit_status = EXIT_SUCCESS;
+
+                    // Run subshell commands
+                    for subshell_cmd in body {
+                        exit_status = self.handle_top_level_command(shell, subshell_cmd);
+                        if exit_status == EXIT_INTERRUPTED {
+                            break;
+                        }
+                    }
+
+                    std::process::exit(exit_status);
+                }
+                Err(err) => {
+                    eprintln!(
+                        "{} error: subshell fork failed: {}",
+                        env!("CARGO_PKG_NAME"),
+                        err
+                    );
+                    EXIT_FAILURE
+                }
+            }
+        }
+
         // fds_to_restore[i] = (src_fd, dst_fd); src_fd shoulde be greater than 9
         let mut fds_to_restore: Vec<SavedFd> = Vec::new();
 
@@ -331,60 +422,87 @@ impl<'a> InputInterpreter<'a> {
                 return EXIT_FAILURE;
             };
 
-            let (dst_fd, open_res, path) = match redirect {
-                Redirect::Read((fd, path)) => {
-                    (
-                        fd as i32,
-                        OpenOptions::new()
-                            .read(true)
-                            .open(&path),
-                        path
-                    )
+            // (src_fd, Option<dst_fd>), in case second var is None then we close src_fd
+            let (src_fd, dst_fd): (Fd, Fd) = match redirect {
+                Redirect::Read((fd, path)) |
+                Redirect::Write((fd, path)) |
+                Redirect::Append((fd, path)) |
+                Redirect::ReadWrite((fd, path)) => {
+                    let open_options = match redirect {
+                        Redirect::Read(_) => {
+                            OpenOptions::new()
+                                .read(true)
+                        }
+                        Redirect::Write(_) => {
+                            OpenOptions::new()
+                                .write(true)
+                                .truncate(true)
+                                .create(true)
+                        }
+                        Redirect::Append(_) => {
+                            OpenOptions::new()
+                                .write(true)
+                                .append(true)
+                                .create(true)
+                        }
+                        Redirect::ReadWrite(_) => {
+                            OpenOptions::new()
+                                .read(true)
+                                .write(true)
+                                .create(true)
+                        }
+                        _ => unreachable!()
+                    };
+
+                    let opened_fd = match open_options.open(path) {
+                        Ok(file) => {
+                            // After this line, user is responsible for closing fd
+                            file.into_raw_fd() as Fd
+                        },
+                        Err(err) => {
+                            eprintln!("{}: {}: {}", env!("CARGO_PKG_NAME"), path, err);
+                            return EXIT_FAILURE;
+                        }
+                    };
+
+                    (opened_fd, fd)
                 }
-                Redirect::Write((fd, path)) => {
-                    (
-                        fd as i32,
-                        OpenOptions::new()
-                            .write(true)
-                            .truncate(true)
-                            .create(true)
-                            .open(&path),
-                        path
-                    )
+                Redirect::PipeIn(fd) => {
+                    (fd, STDIN)
                 }
-                Redirect::Append((fd, path)) => {
-                    (
-                        fd as i32,
-                        OpenOptions::new()
-                            .write(true)
-                            .append(true)
-                            .create(true)
-                            .open(&path),
-                        path
-                    )
+                Redirect::PipeOut(fd) => {
+                    (fd, STDOUT)
+                }
+                Redirect::Duplicate { fd_src, fd_dst } => {
+                    (fd_src, fd_dst)
+                }
+                Redirect::Close(fd) => {
+                    // TODO native support
+                    match wasi_ext_lib::fcntl(
+                        fd as RawFd,
+                    wasi_ext_lib::FcntlCommand::F_MVFD { min_fd_num: 10 }
+                    ) {
+                        Ok(saved_fd) => {
+                            fds_to_restore.push(SavedFd::Move { src_fd: saved_fd as Fd, dst_fd: fd });
+                        },
+                        Err(err) => {
+                            panic!("{}: fcntl: {}", env!("CARGO_PKG_NAME"), err)
+                        }
+                    }
+                    continue;
                 }
             };
 
-            let opened_fd = match open_res {
-                Ok(file) => {
-                    // After this line, user is responsible for closing fd
-                    file.into_raw_fd()  
-                }, 
-                Err(err) => {
-                    eprintln!("{}: {}: {}", env!("CARGO_PKG_NAME"), path, err);
-                    return EXIT_FAILURE;
-                }
-            };
-
+            // TODO native support
             match unsafe { wasi::fd_fdstat_get(dst_fd as u32) } {
-                Ok(_) if dst_fd != opened_fd  => {
+                Ok(_) if dst_fd != src_fd  => {
                     // Make copy of fd
                     match wasi_ext_lib::fcntl(
                         dst_fd as RawFd,
                     wasi_ext_lib::FcntlCommand::F_MVFD { min_fd_num: 10 }
                     ) {
                         Ok(saved_fd) => {
-                            fds_to_restore.push(SavedFd::Move { src_fd: saved_fd, dst_fd });
+                            fds_to_restore.push(SavedFd::Move { src_fd: saved_fd as Fd, dst_fd });
                         },
                         Err(err) => {
                             panic!("{}: fcntl: {}", env!("CARGO_PKG_NAME"), err)
@@ -405,99 +523,20 @@ impl<'a> InputInterpreter<'a> {
                 }
             }
 
-            if let Err(err) = unsafe { wasi::fd_renumber(opened_fd as u32, dst_fd as u32) } {
+            // TODO: Change fd_renumber to duplicate fd
+            // TODO: native support
+            if let Err(err) = unsafe { wasi::fd_renumber(src_fd, dst_fd) } {
                 panic!("{}: fd_renumber: {}", env!("CARGO_PKG_NAME"), err)
             }
         }
 
         let exit_status = match kind {
-            #[cfg(target_os = "wasi")]
+            // #[cfg(target_os = "wasi")]
             ast::CompoundCommandKind::Subshell {
                 body: _,
                 start_pos: _,
                 end_pos: _,
             } => unreachable!(),
-            #[cfg(not(target_os = "wasi"))]
-            ast::CompoundCommandKind::Subshell {
-                body,
-                start_pos: _,
-                end_pos: _,
-            } => {
-                match unsafe { fork() } {
-                    Ok(ForkResult::Parent { child }) => {
-                        let mut exit_status = EXIT_SUCCESS;
-                        if !background {
-                            let wait_status = waitpid(child, None).unwrap_or_else(|_| {
-                                panic!(
-                                    "{}: waitpid for subshell command error",
-                                    env!("CARGO_PKG_NAME")
-                                )
-                            });
-
-                            loop {
-                                match wait_status {
-                                    WaitStatus::Exited(waited_pid, exit_code)
-                                        if waited_pid == child =>
-                                    {
-                                        exit_status = exit_code;
-                                        break;
-                                    }
-                                    WaitStatus::Exited(_, _) => {
-                                        continue;
-                                    }
-                                    _ => unreachable!(),
-                                }
-                            }
-                        }
-                        exit_status
-                    }
-                    Ok(ForkResult::Child) => {
-                        // Apply all redirects passed to subshell
-                        let (opened_fds, status) = preprocess_redirects(redirects);
-                        if let Err(e) = status {
-                            eprintln!("{}: {}", env!("CARGO_PKG_NAME"), e);
-                            std::process::exit(EXIT_FAILURE);
-                        }
-
-                        for (fd, target) in opened_fds.iter() {
-                            let (source, target) = match target {
-                                OpenedFd::File { file, writable: _ } => (file.as_raw_fd(), *fd),
-                                OpenedFd::PipeReader(pipe) => (pipe.as_raw_fd(), *fd),
-                                OpenedFd::PipeWriter(pipe) => (pipe.as_raw_fd(), *fd),
-                                OpenedFd::StdIn => (STDIN as i32, *fd),
-                                OpenedFd::StdOut => (STDOUT as i32, *fd),
-                                OpenedFd::StdErr => (STDERR as i32, *fd),
-                            };
-                            if source != target {
-                                nix::unistd::dup2(source, target)
-                                    .expect("Cannot duplicate fd before subshell execution!");
-                                nix::unistd::close(source)
-                                    .expect("Cannot duplicate fd before subshell execution!");
-                            }
-                        }
-
-                        let mut exit_status = EXIT_SUCCESS;
-
-                        // Run subshell commands
-                        for subshell_cmd in body {
-                            exit_status = self.handle_top_level_command(shell, subshell_cmd);
-                            if exit_status == EXIT_INTERRUPTED {
-                                break;
-                            }
-                        }
-
-                        std::process::exit(exit_status);
-                    }
-                    Err(err) => {
-                        eprintln!(
-                            "{} error: subshell fork failed: {}",
-                            env!("CARGO_PKG_NAME"),
-                            err
-                        );
-                        EXIT_FAILURE
-                    }
-                }
-            }
             ast::CompoundCommandKind::For { var, words, body } => {
                 let mut exit_status = EXIT_SUCCESS;
                 if let Some(for_list) = words {
@@ -761,70 +800,61 @@ impl<'a> InputInterpreter<'a> {
         match redirect_type {
             ast::Redirect::Write(file_descriptor, top_level_word) => {
                 // TODO: check noclobber option is set
-                let file_descriptor = file_descriptor.unwrap_or(STDOUT);
+                let file_descriptor = file_descriptor.map_or_else(|| STDOUT, |fd| fd as Fd);
                 if let Some(mut filename) = self.handle_top_level_word(shell, top_level_word) {
                     filename = get_absolute_path(filename);
-                    #[cfg(not(target_os = "wasi"))]
-                    let file_descriptor = file_descriptor as RawFd;
-                    Some(Redirect::Write((file_descriptor, filename)))
+                    Some(Redirect::Write((file_descriptor as Fd, filename)))
                 } else {
                     None
                 }
             }
             ast::Redirect::Append(file_descriptor, top_level_word) => {
-                let file_descriptor = file_descriptor.unwrap_or(STDOUT);
+                let file_descriptor = file_descriptor.map_or_else(|| STDOUT, |fd| fd as Fd);
                 if let Some(mut filename) = self.handle_top_level_word(shell, top_level_word) {
                     filename = get_absolute_path(filename);
-                    #[cfg(not(target_os = "wasi"))]
-                    let file_descriptor = file_descriptor as RawFd;
                     Some(Redirect::Append((file_descriptor, filename)))
                 } else {
                     None
                 }
             }
             ast::Redirect::Read(file_descriptor, top_level_word) => {
-                let file_descriptor = file_descriptor.unwrap_or(STDIN);
+                let file_descriptor = file_descriptor.map_or_else(|| STDIN, |fd| fd as Fd);
                 if let Some(mut filename) = self.handle_top_level_word(shell, top_level_word) {
                     filename = get_absolute_path(filename);
-                    #[cfg(not(target_os = "wasi"))]
-                    let file_descriptor = file_descriptor as RawFd;
                     Some(Redirect::Read((file_descriptor, filename)))
                 } else {
                     None
                 }
             }
-            #[cfg(not(target_os = "wasi"))]
             ast::Redirect::ReadWrite(file_descriptor, top_level_word) => {
-                let file_descriptor = file_descriptor.unwrap_or(STDIN);
+                let file_descriptor = file_descriptor.map_or_else(|| STDIN, |fd| fd as Fd);
                 if let Some(mut filename) = self.handle_top_level_word(shell, top_level_word) {
                     filename = get_absolute_path(filename);
-                    Some(Redirect::ReadWrite((file_descriptor as RawFd, filename)))
+                    Some(Redirect::ReadWrite((file_descriptor, filename)))
                 } else {
                     None
                 }
             }
-            #[cfg(not(target_os = "wasi"))]
             ast::Redirect::Clobber(file_descriptor, top_level_word) => {
-                let file_descriptor = file_descriptor.unwrap_or(STDOUT);
+                let file_descriptor = file_descriptor.map_or_else(|| STDOUT, |fd| fd as Fd);
                 if let Some(mut filename) = self.handle_top_level_word(shell, top_level_word) {
                     filename = get_absolute_path(filename);
-                    Some(Redirect::Write((file_descriptor as RawFd, filename)))
+                    Some(Redirect::Write((file_descriptor, filename)))
                 } else {
                     None
                 }
             }
-            #[cfg(not(target_os = "wasi"))]
             ast::Redirect::DupRead(file_descriptor, top_level_word) => {
-                let fd_dest = file_descriptor.unwrap_or(STDIN);
+                let fd_dst = file_descriptor.map_or_else(|| STDIN, |fd| fd as Fd);
                 if let Some(fd) = self.handle_top_level_word(shell, top_level_word) {
                     match fd.as_str() {
-                        "-" => Some(Redirect::Close(fd_dest as RawFd)),
+                        "-" => Some(Redirect::Close(fd_dst as Fd)),
                         fd => {
-                            if let Ok(fd_source) = fd.parse::<u16>() {
-                                Some(Redirect::Duplicate((fd_dest as RawFd, fd_source as RawFd)))
+                            if let Ok(fd_src) = fd.parse::<Fd>() {
+                                Some(Redirect::Duplicate{ fd_src, fd_dst })
                             } else {
                                 eprintln!(
-                                    "DupRead redirect top_level_word not parsed: {top_level_word:?}"
+                                    "DupRead redirect cannot be parsed: {top_level_word:?}"
                                 );
                                 None
                             }
@@ -834,18 +864,17 @@ impl<'a> InputInterpreter<'a> {
                     None
                 }
             }
-            #[cfg(not(target_os = "wasi"))]
             ast::Redirect::DupWrite(file_descriptor, top_level_word) => {
-                let fd_dest = file_descriptor.unwrap_or(STDOUT);
+                let fd_dst = file_descriptor.map_or_else(|| STDOUT, |fd| fd as Fd);
                 if let Some(fd) = self.handle_top_level_word(shell, top_level_word) {
                     match fd.as_str() {
-                        "-" => Some(Redirect::Close(fd_dest as RawFd)),
+                        "-" => Some(Redirect::Close(fd_dst as Fd)),
                         fd => {
-                            if let Ok(fd_source) = fd.parse::<u16>() {
-                                Some(Redirect::Duplicate((fd_dest as RawFd, fd_source as RawFd)))
+                            if let Ok(fd_src) = fd.parse::<Fd>() {
+                                Some(Redirect::Duplicate{ fd_src, fd_dst })
                             } else {
                                 eprintln!(
-                                    "DupWrite redirect top_level_word not parsed: {top_level_word:?}"
+                                    "DupWrite redirect cannot be parsed: {top_level_word:?}"
                                 );
                                 None
                             }
