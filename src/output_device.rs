@@ -7,107 +7,143 @@
 #[cfg(not(target_os = "wasi"))]
 use crate::shell_base::{OpenedFd, STDERR, STDOUT};
 #[cfg(target_os = "wasi")]
-use crate::shell_base::{Redirect, STDERR, STDOUT};
+use crate::shell_base::{Fd, Redirect, STDERR, STDOUT};
 use color_eyre::Report;
 #[cfg(not(target_os = "wasi"))]
 use std::collections::HashMap;
 #[cfg(target_os = "wasi")]
-use std::fs::{self, OpenOptions};
+use std::fs::{File, OpenOptions};
+use std::os::fd::{FromRawFd, IntoRawFd, RawFd};
 use std::io::Write;
 #[cfg(not(target_os = "wasi"))]
 use std::os::unix::prelude::RawFd;
-#[cfg(target_os = "wasi")]
-use std::path::Path;
 
 /// Wrapper for stdout/stderr operations from shell builtins so that they are redirects-aware
-
-#[cfg(target_os = "wasi")]
 pub struct OutputDevice<'a> {
-    redirects: &'a [Redirect],
-    stdout: String,
-    stderr: String,
+    stdout_redirect: Option<&'a Redirect>,
+    stderr_redirect: Option<&'a Redirect>,
+    stdout_data: String,
+    stderr_data: String,
 }
 
-#[cfg(target_os = "wasi")]
 impl<'a> OutputDevice<'a> {
-    pub fn new(redirects: &'a [Redirect]) -> Result<Self, String> {
-        for i in redirects.iter() {
-            match i {
-                Redirect::Write((_, path))
-                | Redirect::Read((_, path))
-                | Redirect::Append((_, path)) => {
-                    if Path::new(path).is_dir() {
-                        return Err(format!("{path}: Is a directory"));
-                    }
-                }
-            }
-        }
+    pub fn new() -> Result<Self, String> {
         Ok(OutputDevice {
-            redirects,
-            stdout: String::new(),
-            stderr: String::new(),
+            stdout_redirect: None,
+            stderr_redirect: None,
+            stdout_data: String::new(),
+            stderr_data: String::new(),
         })
     }
 
+    pub fn set_redirect_out(&mut self, redirect: &'a Redirect) {
+        self.stdout_redirect = Some(redirect);
+    }
+
+    pub fn set_redirect_err(&mut self, redirect: &'a Redirect) {
+        self.stderr_redirect = Some(redirect);
+    }
+
     // TODO: ensure this gets called, maybe move it to custom Drop implementation
-    pub fn flush(&self) -> Result<(), Report> {
-        if !self.stdout.is_empty() {
-            self.flush_fd(STDOUT, &self.stdout)?;
+    pub fn flush(&mut self) -> Result<(), Report> {
+        if !self.stdout_data.is_empty() {
+            self.flush_fd(STDOUT, &self.stdout_data)?;
         }
-        if !self.stderr.is_empty() {
-            self.flush_fd(STDERR, &self.stderr)?;
+        if !self.stderr_data.is_empty() {
+            self.flush_fd(STDERR, &self.stdout_data)?;
         }
         Ok(())
     }
 
-    fn flush_fd(&self, to_fd: u16, output: &str) -> Result<(), Report> {
-        let mut is_redirected = false;
-        for redirect in self.redirects {
-            match redirect {
-                Redirect::Write((fd, file)) => {
-                    if *fd == to_fd {
-                        fs::write(file, output)?;
-                        is_redirected = true;
-                    }
-                }
-                Redirect::Append((fd, file)) => {
-                    if *fd == to_fd {
-                        let mut file = OpenOptions::new().write(true).append(true).open(file)?;
-                        write!(file, "{output}")?;
-                        is_redirected = true;
-                    }
-                }
-                _ => {}
+    fn flush_fd(&self, to_fd: Fd, output: &str) -> Result<(), Report> {
+        let redirect = if to_fd == STDOUT {
+            self.stdout_redirect
+        } else {
+            self.stderr_redirect
+        };
+
+        let mut finall_file = match redirect {
+            None => unsafe { File::from_raw_fd(to_fd as RawFd) },
+            Some(Redirect::Write(_, path))  => {
+                OpenOptions::new()
+                    .write(true)
+                    .truncate(true)
+                    .create(true)
+                    .open(path)?
+                
             }
+            Some(Redirect::Append(_, path)) => {
+                OpenOptions::new()
+                    .write(true)
+                    .append(true)
+                    .create(true)
+                    .open(path)?
+            }
+            Some(Redirect::ReadWrite(_, path)) => {
+                OpenOptions::new()
+                    .write(true)
+                    .create(true)
+                    .open(path)?
+            }
+            Some(Redirect::PipeOut(fd)) => {
+                unsafe { File::from_raw_fd(*fd as RawFd) }
+            }
+            Some(Redirect::Duplicate { fd_src, fd_dst: _ }) => {
+                unsafe { File::from_raw_fd(*fd_src as RawFd) }
+            }
+            Some(Redirect::Read(_, _)) |
+            Some(Redirect::PipeIn(_)) |
+            Some(Redirect::Close(_)) => {
+                return Err(Report::msg(
+                format!(
+                        "Wrong redirection type '{:?}' for writing.",
+                        redirect.unwrap()
+                    )
+                ));
+            }
+        };
+
+        let res = write!(finall_file, "{}", output);
+
+        match redirect {
+            None => (),
+            Some(Redirect::Write(_, _)) |
+            Some(Redirect::Append(_, _)) |
+            Some(Redirect::ReadWrite(_, _)) => {
+                // Close opened file;
+                drop(finall_file);
+            }
+            Some(Redirect::PipeOut(_)) | 
+            Some(Redirect::Duplicate { fd_src: _, fd_dst: _ }) => {
+                // Leave fd opened
+                let _ = finall_file.into_raw_fd();
+            }
+            _ => unreachable!()
         }
 
-        if !is_redirected {
-            if to_fd == STDOUT {
-                print!("{output}");
-            } else {
-                eprint!("{output}");
-            }
+        if let Err(err) = res {
+            Err(Report::msg(format!("Cannot write to file descriptor in output device: {}", err)))
+        } else {
+            Ok(())
         }
-
-        Ok(())
     }
 
     pub fn print(&mut self, output: &str) {
-        self.stdout.push_str(output);
+        self.stdout_data.push_str(output);
     }
 
     pub fn println(&mut self, output: &str) {
-        self.stdout.push_str(output);
-        self.stdout.push('\n');
+        self.stdout_data.push_str(output);
+        self.stdout_data.push('\n');
     }
 
     pub fn eprint(&mut self, output: &str) {
-        self.stderr.push_str(output);
+        self.stderr_data.push_str(output);
     }
 
     pub fn eprintln(&mut self, output: &str) {
-        self.stderr.push_str(output);
-        self.stderr.push('\n');
+        self.stderr_data.push_str(output);
+        self.stderr_data.push('\n');
     }
 }
 
