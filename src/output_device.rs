@@ -27,13 +27,13 @@ pub struct OutputDevice<'a> {
 }
 
 impl<'a> OutputDevice<'a> {
-    pub fn new() -> Result<Self, String> {
-        Ok(OutputDevice {
+    pub fn new() -> Self {
+        OutputDevice {
             stdout_redirect: None,
             stderr_redirect: None,
             stdout_data: String::new(),
             stderr_data: String::new(),
-        })
+        }
     }
 
     pub fn set_redirect_out(&mut self, redirect: &'a Redirect) {
@@ -50,7 +50,7 @@ impl<'a> OutputDevice<'a> {
             self.flush_fd(STDOUT, &self.stdout_data)?;
         }
         if !self.stderr_data.is_empty() {
-            self.flush_fd(STDERR, &self.stdout_data)?;
+            self.flush_fd(STDERR, &self.stderr_data)?;
         }
         Ok(())
     }
@@ -106,13 +106,13 @@ impl<'a> OutputDevice<'a> {
         let res = write!(finall_file, "{}", output);
 
         match redirect {
-            None => (),
             Some(Redirect::Write(_, _)) |
             Some(Redirect::Append(_, _)) |
             Some(Redirect::ReadWrite(_, _)) => {
                 // Close opened file;
                 drop(finall_file);
             }
+            None |
             Some(Redirect::PipeOut(_)) | 
             Some(Redirect::Duplicate { fd_src: _, fd_dst: _ }) => {
                 // Leave fd opened
@@ -144,108 +144,5 @@ impl<'a> OutputDevice<'a> {
     pub fn eprintln(&mut self, output: &str) {
         self.stderr_data.push_str(output);
         self.stderr_data.push('\n');
-    }
-}
-
-#[cfg(not(target_os = "wasi"))]
-pub struct OutputDevice {
-    redirects: HashMap<RawFd, OpenedFd>,
-    stdout: String,
-    stderr: String,
-}
-
-#[cfg(not(target_os = "wasi"))]
-impl OutputDevice {
-    pub fn new(redirects: &HashMap<RawFd, OpenedFd>) -> Result<Self, String> {
-        let redirects = redirects
-            .iter()
-            .filter_map(|(fd, obj)| match obj {
-                OpenedFd::StdIn | OpenedFd::PipeReader(_) => None,
-                OpenedFd::File { file, writable } => {
-                    if *writable {
-                        let file = file.try_clone().unwrap();
-                        Some((
-                            *fd,
-                            OpenedFd::File {
-                                file,
-                                writable: true,
-                            },
-                        ))
-                    } else {
-                        None
-                    }
-                }
-                OpenedFd::PipeWriter(pipe) => {
-                    let pipe = pipe.try_clone().unwrap();
-                    Some((*fd, OpenedFd::PipeWriter(pipe)))
-                }
-                OpenedFd::StdOut => Some((*fd, OpenedFd::StdOut)),
-                OpenedFd::StdErr => Some((*fd, OpenedFd::StdErr)),
-            })
-            .collect::<HashMap<RawFd, OpenedFd>>();
-        Ok(OutputDevice {
-            redirects,
-            stdout: String::new(),
-            stderr: String::new(),
-        })
-    }
-
-    // TODO: ensure this gets called, maybe move it to custom Drop implementation
-    pub fn flush(&mut self) -> Result<(), Report> {
-        // TODO: Due to file/pipe writer self object needs to be mutable
-        // TODO: Also we must clone stdout/stderr caused with that mutability
-        if !self.stdout.is_empty() {
-            if let Err(rep) = self.flush_fd(STDOUT, &self.stdout.clone()) {
-                self.eprintln(format!("{}: {}", env!("CARGO_PKG_NAME"), rep).as_str());
-            }
-        }
-        if !self.stderr.is_empty() {
-            self.flush_fd(STDERR, &self.stderr.clone())?;
-        }
-        Ok(())
-    }
-
-    fn flush_fd(&mut self, to_fd: u16, output: &str) -> Result<(), Report> {
-        let out_obj = match self.redirects.get_mut(&(to_fd as RawFd)) {
-            Some(o) => o,
-            None => {
-                return Err(Report::new(std::io::Error::from_raw_os_error(
-                    nix::errno::Errno::EBADF as i32,
-                )))
-            }
-        };
-        match out_obj {
-            OpenedFd::File {
-                file,
-                writable: true,
-            } => {
-                write!(file, "{output}")?;
-            }
-            OpenedFd::PipeWriter(pipe) => {
-                write!(pipe, "{output}")?;
-            }
-            OpenedFd::StdOut => print!("{output}"),
-            OpenedFd::StdErr => eprint!("{output}"),
-            _ => panic!("OutputDevice: received input object"),
-        }
-        Ok(())
-    }
-
-    pub fn print(&mut self, output: &str) {
-        self.stdout.push_str(output);
-    }
-
-    pub fn println(&mut self, output: &str) {
-        self.stdout.push_str(output);
-        self.stdout.push('\n');
-    }
-
-    pub fn eprint(&mut self, output: &str) {
-        self.stderr.push_str(output);
-    }
-
-    pub fn eprintln(&mut self, output: &str) {
-        self.stderr.push_str(output);
-        self.stderr.push('\n');
     }
 }
