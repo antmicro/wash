@@ -7,13 +7,9 @@
 use std::collections::HashMap;
 use std::env;
 #[cfg(target_os = "wasi")]
-use std::fs::{self, OpenOptions};
-#[cfg(target_os = "wasi")]
+use std::fs;
+use std::fs::OpenOptions;
 use std::os::fd::IntoRawFd;
-#[cfg(not(target_os = "wasi"))]
-use std::os::fd::AsRawFd;
-#[cfg(not(target_os = "wasi"))]
-use std::os::unix::prelude::RawFd;
 #[cfg(target_os = "wasi")]
 use std::path::Path;
 use std::path::PathBuf;
@@ -25,20 +21,17 @@ use conch_parser::parse::{DefaultParser, ParseError};
 use glob::Pattern;
 
 #[cfg(not(target_os = "wasi"))]
-use nix::{
-    sys::wait::{waitpid, WaitStatus},
-    unistd::{fork, ForkResult},
-};
+use nix;
 
 use crate::shell_base::{
-    Fd, Redirect, Shell, EXIT_FAILURE, EXIT_INTERRUPTED, EXIT_SUCCESS, STDIN, STDOUT,
+    Fd, Redirect, Shell, EXIT_FAILURE, EXIT_INTERRUPTED, EXIT_SUCCESS, STDIN, STDOUT
 };
 
 #[cfg(not(target_os = "wasi"))]
-use crate::shell_base::{preprocess_redirects, OpenedFd, STDERR};
+use crate::shell_base::{apply_redirects, wait_for_child};
 
 enum SavedFd {
-    Move { src_fd: Fd, dst_fd: Fd },
+    Move { fd_src: Fd, fd_dst: Fd },
     Close { fd: Fd },
 }
 
@@ -162,7 +155,6 @@ impl<'a> InputInterpreter<'a> {
         cmds: &[ast::DefaultPipeableCommand],
         background: bool,
     ) -> i32 {
-        #[cfg(target_os = "wasi")]
         let exit_status = {
             #[cfg(target_os = "wasi")]
             // TODO: name of the virtual file should be uniquely generated
@@ -176,8 +168,11 @@ impl<'a> InputInterpreter<'a> {
                     .into_raw_fd() as Fd;
 
             #[cfg(not(target_os = "wasi"))]
-            let (mut reader, mut writer) = {
-                os_pipe::pipe().unwrap()
+            let (fd_reader, fd_writer) = {
+                let pipe = os_pipe::pipe()
+                    .expect("Cannot create pipe.");
+                (pipe.0.into_raw_fd() as Fd, pipe.1.into_raw_fd() as Fd)
+
             };
 
             let mut exit_code = self.handle_pipeable_command(
@@ -192,32 +187,42 @@ impl<'a> InputInterpreter<'a> {
                 wasi::fd_close(fd_writer)
             }.expect("Cannot close pipe write end!");
 
+            #[cfg(not(target_os = "wasi"))]
+            let mut saved_reader = fd_reader;
+            #[cfg(not(target_os = "wasi"))]
+            nix::unistd::close(fd_writer).expect("Cannot close pipe write end!");
+
             for (i, cmd) in cmds.iter().enumerate().skip(1).take(cmds.len() - 2) {
                 if exit_code == EXIT_INTERRUPTED {
                     break;
                 }
 
-                let (fd_writer, fd_reader) = {
+                let (fd_reader, fd_writer) = {
                     #[cfg(target_os = "wasi")]
                     {
+                        let read_end = OpenOptions::new()
+                            .read(true)
+                            .open(format!("/proc/pipe{}.txt", i - 1))
+                            .expect("Cannot create pipe read end!");
                         let write_end = OpenOptions::new()
                             .write(true)
                             .create(true)
                             .truncate(true)
                             .open(format!("/proc/pipe{i}.txt"))
                             .expect("Cannot create pipe write end!");
- 
-                        let read_end = OpenOptions::new()
-                            .read(true)
-                            .open(format!("/proc/pipe{}.txt", i - 1))
-                            .expect("Cannot create pipe read end!");
 
-                        (write_end.into_raw_fd() as Fd, read_end.into_raw_fd() as Fd)
+                        (read_end.into_raw_fd() as Fd, write_end.into_raw_fd() as Fd)
                     }
 
                     #[cfg(not(target_os = "wasi"))]
-                    //TODO: close previous pipe write
-                    os_pipe::pipe().unwrap()
+                    {
+                        let _ = i;
+                        let pipe = os_pipe::pipe()
+                            .expect("Cannot create pipe.");
+                        let fds = (saved_reader, pipe.1.into_raw_fd() as Fd);
+                        saved_reader = pipe.0.into_raw_fd() as Fd;
+                        fds
+                    }
                 };
 
                 exit_code = self.handle_pipeable_command(
@@ -236,14 +241,27 @@ impl<'a> InputInterpreter<'a> {
                     wasi::fd_close(fd_reader).expect("Cannot close pipe read end!");
                     wasi::fd_close(fd_writer).expect("Cannot close pipe write end!");
                 }
+                #[cfg(not(target_os = "wasi"))]
+                {
+                    nix::unistd::close(fd_reader).expect("Cannot close pipe read end!");
+                    nix::unistd::close(fd_writer).expect("Cannot close pipe write end!");
+                }
             }
 
             if exit_code != EXIT_INTERRUPTED {
-                let fd_reader = OpenOptions::new()
-                    .read(true)
-                    .open(format!("/proc/pipe{}.txt", cmds.len() - 2))
-                    .expect("Cannot create pipe")
-                    .into_raw_fd() as Fd;
+                let fd_reader = {
+                    #[cfg(target_os = "wasi")]
+                    {
+                        OpenOptions::new()
+                            .read(true)
+                            .open(format!("/proc/pipe{}.txt", cmds.len() - 2))
+                            .expect("Cannot create pipe")
+                            .into_raw_fd() as Fd
+                    }
+
+                    #[cfg(not(target_os = "wasi"))]
+                    saved_reader
+                };
 
                 exit_code = self.handle_pipeable_command(
                     shell,
@@ -258,6 +276,8 @@ impl<'a> InputInterpreter<'a> {
                 unsafe {
                     wasi::fd_close(fd_reader)
                 }.expect("Cannot close pipe read end!");
+                #[cfg(not(target_os = "wasi"))]
+                nix::unistd::close(fd_reader).expect("Cannot close pipe write end!");
             }
 
             // TODO: temporary solution before in-memory files get implemented
@@ -315,6 +335,7 @@ impl<'a> InputInterpreter<'a> {
             start_pos,
             end_pos,
         } = kind {
+            // TODO: preproc reds
             for redirect_type in io {
                 if let Some(redirect) = self.handle_redirect_type(shell, redirect_type) {
                     redirects.push(redirect);
@@ -346,57 +367,25 @@ impl<'a> InputInterpreter<'a> {
             start_pos: _,
             end_pos: _,
         } = kind {
-            match unsafe { fork() } {
-                Ok(ForkResult::Parent { child }) => {
-                    let mut exit_status = EXIT_SUCCESS;
-                    if !background {
-                        let wait_status = waitpid(child, None).unwrap_or_else(|_| {
-                            panic!(
-                                "{}: waitpid for subshell command error",
-                                env!("CARGO_PKG_NAME")
-                            )
-                        });
-
-                        loop {
-                            match wait_status {
-                                WaitStatus::Exited(waited_pid, exit_code)
-                                    if waited_pid == child =>
-                                {
-                                    exit_status = exit_code;
-                                    break;
-                                }
-                                WaitStatus::Exited(_, _) => {
-                                    continue;
-                                }
-                                _ => unreachable!(),
-                            }
-                        }
-                    }
-                    exit_status
+            for redirect_type in io {
+                if let Some(redirect) = self.handle_redirect_type(shell, redirect_type) {
+                    redirects.push(redirect);
                 }
-                Ok(ForkResult::Child) => {
-                    // Apply all redirects passed to subshell
-                    let (opened_fds, status) = preprocess_redirects(redirects);
-                    if let Err(e) = status {
-                        eprintln!("{}: {}", env!("CARGO_PKG_NAME"), e);
-                        std::process::exit(EXIT_FAILURE);
-                    }
+            }
 
-                    for (fd, target) in opened_fds.iter() {
-                        let (source, target) = match target {
-                            OpenedFd::File { file, writable: _ } => (file.as_raw_fd(), *fd),
-                            OpenedFd::PipeReader(pipe) => (pipe.as_raw_fd(), *fd),
-                            OpenedFd::PipeWriter(pipe) => (pipe.as_raw_fd(), *fd),
-                            OpenedFd::StdIn => (STDIN as i32, *fd),
-                            OpenedFd::StdOut => (STDOUT as i32, *fd),
-                            OpenedFd::StdErr => (STDERR as i32, *fd),
-                        };
-                        if source != target {
-                            nix::unistd::dup2(source, target)
-                                .expect("Cannot duplicate fd before subshell execution!");
-                            nix::unistd::close(source)
-                                .expect("Cannot duplicate fd before subshell execution!");
-                        }
+            match unsafe { nix::unistd::fork() } {
+                Ok(nix::unistd::ForkResult::Parent { child }) => {
+                    return if !background {
+                        wait_for_child(child)
+                    } else {
+                        EXIT_SUCCESS
+                    };
+                }
+                Ok(nix::unistd::ForkResult::Child) => {
+                    // Apply all redirects passed to subshell
+                    if let Err(err) = apply_redirects(redirects) {
+                        eprintln!("{}: {}", env!("CARGO_PKG_NAME"), err);
+                        std::process::exit(EXIT_FAILURE);
                     }
 
                     let mut exit_status = EXIT_SUCCESS;
@@ -417,7 +406,7 @@ impl<'a> InputInterpreter<'a> {
                         env!("CARGO_PKG_NAME"),
                         err
                     );
-                    EXIT_FAILURE
+                    return EXIT_FAILURE;
                 }
             }
         }
@@ -436,7 +425,7 @@ impl<'a> InputInterpreter<'a> {
         }
 
         for redirect in redirects.iter().chain(io_redirects.iter()) {
-            let (src_fd, dst_fd): (Fd, Fd) = match redirect {
+            let (fd_src, fd_dst): (Fd, Fd) = match redirect {
                 Redirect::Read(fd, path) |
                 Redirect::Write(fd, path) |
                 Redirect::Append(fd, path) |
@@ -487,32 +476,60 @@ impl<'a> InputInterpreter<'a> {
                     (*fd_src, *fd_dst)
                 }
                 Redirect::Close(fd) => {
-                    // TODO native support
-                    match wasi_ext_lib::fcntl(
+                    #[cfg(target_os = "wasi")]
+                    let move_res = wasi_ext_lib::fcntl(
                         *fd,
-                    wasi_ext_lib::FcntlCommand::F_MVFD { min_fd_num: 10 }
-                    ) {
+                        wasi_ext_lib::FcntlCommand::F_MVFD { min_fd_num: 10 }
+                    );
+
+                    #[cfg(not(target_os = "wasi"))]
+                    let move_res = nix::fcntl::fcntl(
+                        *fd,
+                        nix::fcntl::F_DUPFD(10)
+                    );
+
+                    match move_res {
                         Ok(saved_fd) => {
-                            fds_to_restore.push(SavedFd::Move { src_fd: saved_fd as Fd, dst_fd: *fd });
+                            fds_to_restore.push(SavedFd::Move { fd_src: saved_fd as Fd, fd_dst: *fd });
+                            #[cfg(not(target_os = "wasi"))]
+                            nix::unistd::close(*fd).expect("Cannot close duplicated fd");
                         },
                         Err(err) => {
                             panic!("{}: fcntl: {}", env!("CARGO_PKG_NAME"), err)
                         }
                     }
+
                     continue;
                 }
             };
 
+            #[cfg(target_os = "wasi")]
+            let stat_res = unsafe { wasi::fd_fdstat_get(fd_dst as Fd) };
+
+            #[cfg(not(target_os = "wasi"))]
+            let stat_res = nix::fcntl::fcntl(
+                fd_dst,
+                nix::fcntl::F_GETFD
+            );
             // TODO native support
-            match unsafe { wasi::fd_fdstat_get(dst_fd as u32) } {
-                Ok(_) if dst_fd != src_fd  => {
+            match stat_res {
+                Ok(_) if fd_dst != fd_src  => {
                     // Make copy of fd
-                    match wasi_ext_lib::fcntl(
-                        dst_fd as Fd,
-                    wasi_ext_lib::FcntlCommand::F_MVFD { min_fd_num: 10 }
-                    ) {
+                    #[cfg(target_os = "wasi")]
+                    let move_res = wasi_ext_lib::fcntl(
+                        fd_dst,
+                        wasi_ext_lib::FcntlCommand::F_MVFD { min_fd_num: 10 }
+                    );
+
+                    #[cfg(not(target_os = "wasi"))]
+                    let move_res = nix::fcntl::fcntl(
+                        fd_dst,
+                        nix::fcntl::F_DUPFD(10)
+                    );
+
+                    match move_res {
                         Ok(saved_fd) => {
-                            fds_to_restore.push(SavedFd::Move { src_fd: saved_fd as Fd, dst_fd });
+                            fds_to_restore.push(SavedFd::Move { fd_src: saved_fd as Fd, fd_dst });
                         },
                         Err(err) => {
                             panic!("{}: fcntl: {}", env!("CARGO_PKG_NAME"), err)
@@ -521,24 +538,36 @@ impl<'a> InputInterpreter<'a> {
                 }
                 Ok(_) => {
                     // Case when file is already opened on dst_fd, skip fd_renumber
-                    fds_to_restore.push(SavedFd::Close { fd: dst_fd });
+                    fds_to_restore.push(SavedFd::Close { fd: fd_dst });
                     continue;
                 }
+                #[cfg(target_os = "wasi")]
                 Err(wasi::ERRNO_BADF) => {
                     // We can make redirect without saving fd
-                    fds_to_restore.push(SavedFd::Close { fd: dst_fd });
+                    fds_to_restore.push(SavedFd::Close { fd: fd_dst });
+                }
+                #[cfg(not(target_os = "wasi"))]
+                Err(nix::errno::Errno::EBADF) => {
+                    // We can make redirect without saving fd
+                    fds_to_restore.push(SavedFd::Close { fd: fd_dst });
                 }
                 Err(err) => {
                     panic!("{}: fd_fdstat_get: {}", env!("CARGO_PKG_NAME"), err)
                 }
             }
 
-            // TODO: Change fd_renumber to duplicate fd
-            // TODO: native support
-            if let Err(err) = unsafe { wasi::fd_renumber(src_fd, dst_fd) } {
+            #[cfg(target_os = "wasi")]
+            if let Err(err) = unsafe { wasi::fd_renumber(fd_src, fd_dst) } {
                 panic!("{}: fd_renumber: {}", env!("CARGO_PKG_NAME"), err);
-            } else if let Err(err) = unsafe { wasi::fd_close(src_fd) } {
+            } else if let Err(err) = unsafe { wasi::fd_close(fd_src) } {
                 panic!("{}: fd_close: {}", env!("CARGO_PKG_NAME"), err);
+            }
+
+            #[cfg(not(target_os = "wasi"))]
+            if let Err(err) = nix::unistd::dup2(fd_src, fd_dst) {
+                panic!("{}: dup2: {}", env!("CARGO_PKG_NAME"), err);
+            } else if let Err(err) = nix::unistd::close(fd_src) {
+                panic!("{}: close: {}", env!("CARGO_PKG_NAME"), err);
             }
         }
 
@@ -690,18 +719,30 @@ impl<'a> InputInterpreter<'a> {
 
         // restore saved fds in reversed order
         for saved_fd in fds_to_restore.into_iter().rev() {
-            // TODO: add native support
             match saved_fd {
-                SavedFd::Move { src_fd, dst_fd } => {
-                    if let Err(err) = unsafe { wasi::fd_renumber(src_fd, dst_fd) } {
+                SavedFd::Move { fd_src, fd_dst } => {
+                    #[cfg(target_os = "wasi")]
+                    if let Err(err) = unsafe { wasi::fd_renumber(fd_src, fd_dst) } {
                         panic!("{}: fd_renumber: {}", env!("CARGO_PKG_NAME"), err);
-                    } else if let Err(err) = unsafe { wasi::fd_close(src_fd) } {
+                    } else if let Err(err) = unsafe { wasi::fd_close(fd_src) } {
                         panic!("{}: fd_close: {}", env!("CARGO_PKG_NAME"), err);
+                    }
+
+                    #[cfg(not(target_os = "wasi"))]
+                    if let Err(err) = nix::unistd::dup2(fd_src, fd_dst) {
+                        panic!("{}: dup2: {}", env!("CARGO_PKG_NAME"), err);
+                    } else if let Err(err) = nix::unistd::close(fd_src) {
+                        panic!("{}: close: {}", env!("CARGO_PKG_NAME"), err);
                     }
                 }
                 SavedFd::Close { fd } => {
-                    if let Err(err) = unsafe { wasi::fd_close(fd as u32) } {
+                    #[cfg(target_os = "wasi")]
+                    if let Err(err) = unsafe { wasi::fd_close(fd as Fd) } {
                         panic!("{}: fd_close: {}", env!("CARGO_PKG_NAME"), err);
+                    }
+                    #[cfg(not(target_os = "wasi"))]
+                    if let Err(err) = nix::unistd::close(fd) {
+                        panic!("{}: close: {}", env!("CARGO_PKG_NAME"), err);
                     }
                 }
             }

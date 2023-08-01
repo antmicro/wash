@@ -4,20 +4,15 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-#[cfg(not(target_os = "wasi"))]
-use crate::shell_base::{OpenedFd, STDERR, STDOUT};
-#[cfg(target_os = "wasi")]
-use crate::shell_base::{Fd, Redirect, STDERR, STDOUT};
+// #[cfg(target_os = "wasi")]
+use crate::shell_base::{Fd, Redirect, STDOUT, STDERR};
+
 use color_eyre::Report;
-#[cfg(not(target_os = "wasi"))]
-use std::collections::HashMap;
-#[cfg(target_os = "wasi")]
 use std::fs::{File, OpenOptions};
 use std::os::fd::{FromRawFd, IntoRawFd, RawFd};
 use std::io::Write;
-#[cfg(not(target_os = "wasi"))]
-use std::os::unix::prelude::RawFd;
 
+#[derive(Debug)]
 /// Wrapper for stdout/stderr operations from shell builtins so that they are redirects-aware
 pub struct OutputDevice<'a> {
     stdout_redirect: Option<&'a Redirect>,
@@ -104,7 +99,7 @@ impl<'a> OutputDevice<'a> {
         };
 
         let res = write!(finall_file, "{}", output);
-
+        finall_file.flush().unwrap();
         match redirect {
             Some(Redirect::Write(_, _)) |
             Some(Redirect::Append(_, _)) |
