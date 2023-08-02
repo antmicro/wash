@@ -511,7 +511,7 @@ impl<'a> InputInterpreter<'a> {
                 fd_dst,
                 nix::fcntl::F_GETFD
             );
-            // TODO native support
+
             match stat_res {
                 Ok(_) if fd_dst != fd_src  => {
                     // Make copy of fd
@@ -559,20 +559,15 @@ impl<'a> InputInterpreter<'a> {
             #[cfg(target_os = "wasi")]
             if let Err(err) = unsafe { wasi::fd_renumber(fd_src, fd_dst) } {
                 panic!("{}: fd_renumber: {}", env!("CARGO_PKG_NAME"), err);
-            } else if let Err(err) = unsafe { wasi::fd_close(fd_src) } {
-                panic!("{}: fd_close: {}", env!("CARGO_PKG_NAME"), err);
             }
 
             #[cfg(not(target_os = "wasi"))]
             if let Err(err) = nix::unistd::dup2(fd_src, fd_dst) {
                 panic!("{}: dup2: {}", env!("CARGO_PKG_NAME"), err);
-            } else if let Err(err) = nix::unistd::close(fd_src) {
-                panic!("{}: close: {}", env!("CARGO_PKG_NAME"), err);
             }
         }
 
         let exit_status = match kind {
-            // #[cfg(target_os = "wasi")]
             ast::CompoundCommandKind::Subshell {
                 body: _,
                 start_pos: _,
