@@ -605,8 +605,6 @@ impl Shell {
         let mut escaped = false;
         let mut history_entry_to_display: i32 = -1;
         if self.insert_mode {
-            #[cfg(target_os = "wasi")]
-            let _ = wasi_ext_lib::hterm("cursor-shape", Some("BLOCK"));
             self.insert_mode = false;
         }
 
@@ -664,9 +662,6 @@ impl Shell {
                                     // Insert
                                     [0x32, 0x7e] => {
                                         self.insert_mode = !self.insert_mode;
-                                        #[cfg(target_os = "wasi")]
-                                        let _ =
-                                            wasi_ext_lib::hterm("cursor-shape", Some("UNDERLINE"));
                                         escaped = false;
                                     }
                                     // delete key
