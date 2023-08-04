@@ -273,6 +273,13 @@ pub fn spawn(
         }
         Ok(nix::unistd::ForkResult::Child) => {
             use std::ffi::CString;
+
+            fn env_fmt<T: std::fmt::Display>((key, val): (T, T)) -> CString {
+                CString::new(
+                    format!("{}={}", key, val)
+                ).unwrap()
+            }
+
             // Apply all redirects
             if let Err(err) = apply_redirects(redirects) {
                 eprintln!("{}: {}", env!("CARGO_PKG_NAME"), err);
@@ -289,8 +296,9 @@ pub fn spawn(
             let cargs: Vec<CString> = [prog_name].iter().chain(args.iter())
                 .map(|arg: &&str| CString::new(*arg).unwrap())
                 .collect();
-            let cenv: Vec<CString> = env.iter()
-                .map(|(key, val)| CString::new(format!("{key}={val}")).unwrap())
+
+            let cenv: Vec<CString> = std::env::vars().into_iter().map(env_fmt)
+                .chain(env.iter().map(env_fmt))
                 .collect();
 
             if let Err(err) = nix::unistd::execve(

@@ -820,7 +820,7 @@ impl<'a> InputInterpreter<'a> {
             match shell.execute_command(&args.remove(0), &mut args, &env, background, redirects) {
                 Ok(result) => result,
                 Err(error) => {
-                    eprintln!("{} error: {:?}", env!("CARGO_PKG_NAME"), error);
+                    eprintln!("{}: {:?}", env!("CARGO_PKG_NAME"), error);
                     EXIT_FAILURE
                 }
             }
