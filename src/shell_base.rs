@@ -167,6 +167,24 @@ pub fn preprocess_redirects<'a>(redirects: &'a [Redirect], output_device: &mut O
                 }
             }
             Redirect::Close(fd) => {
+                let fd_res = {
+                    #[cfg(target_os = "wasi")]
+                    unsafe { wasi::fd_fdstat_get(*fd) }
+                    #[cfg(not(target_os = "wasi"))]
+                    nix::fcntl::fcntl(
+                        *fd,
+                        nix::fcntl::F_GETFD
+                    )
+                };
+                if let Err(_) = fd_res {
+                    return Err(Report::msg(
+                format!(
+                            "{}: Bad file descriptor",
+                            fd
+                        )
+                    ));
+                }
+
                 if *fd == STDOUT {
                     output_device.set_redirect_out(redirect);
                 } else if *fd == STDERR {
@@ -1039,7 +1057,13 @@ impl Shell {
         redirects: &[Redirect],
     ) -> Result<i32, Report> {
         let mut output_device = OutputDevice::new();
-        preprocess_redirects(redirects, &mut output_device)?;
+        if let Err(err) = preprocess_redirects(redirects, &mut output_device) {
+            output_device.eprintln(format!(
+                "{}: {}", env!("CARGO_PKG_NAME"), err
+            ).as_str());
+            output_device.flush()?;
+            return Ok(EXIT_FAILURE);
+        }
 
         let result: Result<i32, Report> = if let Some(internal) = INTERNALS_MAP.get(command) {
             internal(self, args, &mut output_device)

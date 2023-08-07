@@ -24,8 +24,11 @@ use glob::Pattern;
 use nix;
 
 use crate::shell_base::{
-    Fd, Redirect, Shell, EXIT_FAILURE, EXIT_INTERRUPTED, EXIT_SUCCESS, STDIN, STDOUT
+    Fd, Redirect, Shell, EXIT_FAILURE, EXIT_INTERRUPTED, EXIT_SUCCESS, STDIN, STDOUT,
+    preprocess_redirects
 };
+
+use crate::output_device::OutputDevice;
 
 #[cfg(not(target_os = "wasi"))]
 use crate::shell_base::{apply_redirects, wait_for_child};
@@ -329,19 +332,32 @@ impl<'a> InputInterpreter<'a> {
     ) -> i32 {
         let ast::CompoundCommand { kind, io } = cmd;
 
+        for redirect_type in io.iter() {
+            if let Some(redirect) = self.handle_redirect_type(shell, redirect_type) {
+                redirects.push(redirect);
+            } else {
+                eprintln!("{}: cannot handle redirect!", env!("CARGO_PKG_NAME"));
+                return EXIT_FAILURE;
+            };
+        }
+
+        let mut output_device = OutputDevice::new();
+        if let Err(err) = preprocess_redirects(redirects, &mut output_device) {
+            output_device.eprintln(format!(
+                "{}: {}", env!("CARGO_PKG_NAME"), err
+            ).as_str());
+            if let Err(err) = output_device.flush() {
+                eprintln!("Cannot flush output_device: {}", err)
+            }
+            return EXIT_FAILURE;
+        }
+
         #[cfg(target_os = "wasi")]
         if let ast::CompoundCommandKind::Subshell {
             body: _,
             start_pos,
             end_pos,
         } = kind {
-            // TODO: preproc reds
-            for redirect_type in io {
-                if let Some(redirect) = self.handle_redirect_type(shell, redirect_type) {
-                    redirects.push(redirect);
-                }
-            }
-
             let subshell_cmds = &self.input[(start_pos.byte + 1)..(end_pos.byte)];
 
             let mut args_vec = vec!["-c".to_string(), subshell_cmds.to_string()];
@@ -367,12 +383,6 @@ impl<'a> InputInterpreter<'a> {
             start_pos: _,
             end_pos: _,
         } = kind {
-            for redirect_type in io {
-                if let Some(redirect) = self.handle_redirect_type(shell, redirect_type) {
-                    redirects.push(redirect);
-                }
-            }
-
             match unsafe { nix::unistd::fork() } {
                 Ok(nix::unistd::ForkResult::Parent { child }) => {
                     return if !background {
@@ -413,18 +423,8 @@ impl<'a> InputInterpreter<'a> {
 
         // fds_to_restore[i] = (src_fd, dst_fd); src_fd shoulde be greater than 9
         let mut fds_to_restore: Vec<SavedFd> = Vec::new();
-        let mut io_redirects = Vec::new();
 
-        for redirect_type in io.iter() {
-            if let Some(redirect) = self.handle_redirect_type(shell, redirect_type) {
-                io_redirects.push(redirect);
-            } else {
-                eprintln!("{}: cannot handle redirect!", env!("CARGO_PKG_NAME"));
-                return EXIT_FAILURE;
-            };
-        }
-
-        for redirect in redirects.iter().chain(io_redirects.iter()) {
+        for redirect in redirects.iter() {
             let (fd_src, fd_dst): (Fd, Fd) = match redirect {
                 Redirect::Read(fd, path) |
                 Redirect::Write(fd, path) |
@@ -459,7 +459,12 @@ impl<'a> InputInterpreter<'a> {
                             file.into_raw_fd() as Fd
                         },
                         Err(err) => {
-                            eprintln!("{}: {}: {}", env!("CARGO_PKG_NAME"), path, err);
+                            output_device.eprintln(format!(
+                                "{}: {}: {}", env!("CARGO_PKG_NAME"), path, err
+                            ).as_str());
+                            if let Err(err) = output_device.flush() {
+                                eprintln!("Cannot flush output_device: {}", err)
+                            }
                             return EXIT_FAILURE;
                         }
                     };
