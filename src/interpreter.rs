@@ -24,8 +24,8 @@ use glob::Pattern;
 use nix;
 
 use crate::shell_base::{
-    Fd, Redirect, Shell, EXIT_FAILURE, EXIT_INTERRUPTED, EXIT_SUCCESS, STDIN, STDOUT,
-    preprocess_redirects
+    preprocess_redirects, Fd, Redirect, Shell, EXIT_FAILURE, EXIT_INTERRUPTED, EXIT_SUCCESS, STDIN,
+    STDOUT,
 };
 
 use crate::output_device::OutputDevice;
@@ -161,21 +161,19 @@ impl<'a> InputInterpreter<'a> {
         let exit_status = {
             #[cfg(target_os = "wasi")]
             // TODO: name of the virtual file should be uniquely generated
-            // TODO: add virtual mode that won't create files but in-memory strings 
+            // TODO: add virtual mode that won't create files but in-memory strings
             let fd_writer = OpenOptions::new()
-                    .write(true)
-                    .create(true)
-                    .truncate(true)
-                    .open("/proc/pipe0.txt")
-                    .expect("Cannot create pipe")
-                    .into_raw_fd() as Fd;
+                .write(true)
+                .create(true)
+                .truncate(true)
+                .open("/proc/pipe0.txt")
+                .expect("Cannot create pipe")
+                .into_raw_fd() as Fd;
 
             #[cfg(not(target_os = "wasi"))]
             let (fd_reader, fd_writer) = {
-                let pipe = os_pipe::pipe()
-                    .expect("Cannot create pipe.");
+                let pipe = os_pipe::pipe().expect("Cannot create pipe.");
                 (pipe.0.into_raw_fd() as Fd, pipe.1.into_raw_fd() as Fd)
-
             };
 
             let mut exit_code = self.handle_pipeable_command(
@@ -186,9 +184,7 @@ impl<'a> InputInterpreter<'a> {
             );
 
             #[cfg(target_os = "wasi")]
-            unsafe {
-                wasi::fd_close(fd_writer)
-            }.expect("Cannot close pipe write end!");
+            unsafe { wasi::fd_close(fd_writer) }.expect("Cannot close pipe write end!");
 
             #[cfg(not(target_os = "wasi"))]
             let mut saved_reader = fd_reader;
@@ -220,8 +216,7 @@ impl<'a> InputInterpreter<'a> {
                     #[cfg(not(target_os = "wasi"))]
                     {
                         let _ = i;
-                        let pipe = os_pipe::pipe()
-                            .expect("Cannot create pipe.");
+                        let pipe = os_pipe::pipe().expect("Cannot create pipe.");
                         let fds = (saved_reader, pipe.1.into_raw_fd() as Fd);
                         saved_reader = pipe.0.into_raw_fd() as Fd;
                         fds
@@ -232,10 +227,7 @@ impl<'a> InputInterpreter<'a> {
                     shell,
                     cmd,
                     background,
-                    &mut vec![
-                        Redirect::PipeIn(fd_reader),
-                        Redirect::PipeOut(fd_writer),
-                    ],
+                    &mut vec![Redirect::PipeIn(fd_reader), Redirect::PipeOut(fd_writer)],
                 );
 
                 // Close reader and writer
@@ -270,15 +262,11 @@ impl<'a> InputInterpreter<'a> {
                     shell,
                     cmds.last().unwrap(),
                     background,
-                    &mut vec![
-                        Redirect::PipeIn(fd_reader)
-                    ],
+                    &mut vec![Redirect::PipeIn(fd_reader)],
                 );
 
                 #[cfg(target_os = "wasi")]
-                unsafe {
-                    wasi::fd_close(fd_reader)
-                }.expect("Cannot close pipe read end!");
+                unsafe { wasi::fd_close(fd_reader) }.expect("Cannot close pipe read end!");
                 #[cfg(not(target_os = "wasi"))]
                 nix::unistd::close(fd_reader).expect("Cannot close pipe write end!");
             }
@@ -343,9 +331,7 @@ impl<'a> InputInterpreter<'a> {
 
         let mut output_device = OutputDevice::new();
         if let Err(err) = preprocess_redirects(redirects, &mut output_device) {
-            output_device.eprintln(format!(
-                "{}: {}", env!("CARGO_PKG_NAME"), err
-            ).as_str());
+            output_device.eprintln(format!("{}: {}", env!("CARGO_PKG_NAME"), err).as_str());
             if let Err(err) = output_device.flush() {
                 eprintln!("Cannot flush output_device: {}", err)
             }
@@ -357,7 +343,8 @@ impl<'a> InputInterpreter<'a> {
             body: _,
             start_pos,
             end_pos,
-        } = kind {
+        } = kind
+        {
             let subshell_cmds = &self.input[(start_pos.byte + 1)..(end_pos.byte)];
 
             let mut args_vec = vec!["-c".to_string(), subshell_cmds.to_string()];
@@ -374,7 +361,7 @@ impl<'a> InputInterpreter<'a> {
                     eprintln!("{} error: {:?}", env!("CARGO_PKG_NAME"), error);
                     EXIT_FAILURE
                 }
-            }
+            };
         }
 
         #[cfg(not(target_os = "wasi"))]
@@ -382,7 +369,8 @@ impl<'a> InputInterpreter<'a> {
             body,
             start_pos: _,
             end_pos: _,
-        } = kind {
+        } = kind
+        {
             match unsafe { nix::unistd::fork() } {
                 Ok(nix::unistd::ForkResult::Parent { child }) => {
                     return if !background {
@@ -426,42 +414,36 @@ impl<'a> InputInterpreter<'a> {
 
         for redirect in redirects.iter() {
             let (fd_src, fd_dst): (Fd, Fd) = match redirect {
-                Redirect::Read(fd, path) |
-                Redirect::Write(fd, path) |
-                Redirect::Append(fd, path) |
-                Redirect::ReadWrite(fd, path) => {
+                Redirect::Read(fd, path)
+                | Redirect::Write(fd, path)
+                | Redirect::Append(fd, path)
+                | Redirect::ReadWrite(fd, path) => {
                     let mut open_options = OpenOptions::new();
                     match redirect {
                         Redirect::Read(_, _) => {
                             open_options.read(true);
                         }
                         Redirect::Write(_, _) => {
-                            open_options.write(true)
-                                .truncate(true)
-                                .create(true);
+                            open_options.write(true).truncate(true).create(true);
                         }
                         Redirect::Append(_, _) => {
-                            open_options.write(true)
-                                .append(true)
-                                .create(true);
+                            open_options.write(true).append(true).create(true);
                         }
                         Redirect::ReadWrite(_, _) => {
-                            open_options.read(true)
-                                .write(true)
-                                .create(true);
+                            open_options.read(true).write(true).create(true);
                         }
-                        _ => unreachable!()
+                        _ => unreachable!(),
                     };
 
                     let opened_fd = match open_options.open(path) {
                         Ok(file) => {
                             // After this line, user is responsible for closing fd
                             file.into_raw_fd() as Fd
-                        },
+                        }
                         Err(err) => {
-                            output_device.eprintln(format!(
-                                "{}: {}: {}", env!("CARGO_PKG_NAME"), path, err
-                            ).as_str());
+                            output_device.eprintln(
+                                format!("{}: {}: {}", env!("CARGO_PKG_NAME"), path, err).as_str(),
+                            );
                             if let Err(err) = output_device.flush() {
                                 eprintln!("Cannot flush output_device: {}", err)
                             }
@@ -471,34 +453,28 @@ impl<'a> InputInterpreter<'a> {
 
                     (opened_fd, *fd)
                 }
-                Redirect::PipeIn(fd) => {
-                    (*fd, STDIN)
-                }
-                Redirect::PipeOut(fd) => {
-                    (*fd, STDOUT)
-                }
-                Redirect::Duplicate { fd_src, fd_dst } => {
-                    (*fd_src, *fd_dst)
-                }
+                Redirect::PipeIn(fd) => (*fd, STDIN),
+                Redirect::PipeOut(fd) => (*fd, STDOUT),
+                Redirect::Duplicate { fd_src, fd_dst } => (*fd_src, *fd_dst),
                 Redirect::Close(fd) => {
                     #[cfg(target_os = "wasi")]
                     let move_res = wasi_ext_lib::fcntl(
                         *fd,
-                        wasi_ext_lib::FcntlCommand::F_MVFD { min_fd_num: 10 }
+                        wasi_ext_lib::FcntlCommand::F_MVFD { min_fd_num: 10 },
                     );
 
                     #[cfg(not(target_os = "wasi"))]
-                    let move_res = nix::fcntl::fcntl(
-                        *fd,
-                        nix::fcntl::F_DUPFD(10)
-                    );
+                    let move_res = nix::fcntl::fcntl(*fd, nix::fcntl::F_DUPFD(10));
 
                     match move_res {
                         Ok(saved_fd) => {
-                            fds_to_restore.push(SavedFd::Move { fd_src: saved_fd as Fd, fd_dst: *fd });
+                            fds_to_restore.push(SavedFd::Move {
+                                fd_src: saved_fd as Fd,
+                                fd_dst: *fd,
+                            });
                             #[cfg(not(target_os = "wasi"))]
                             nix::unistd::close(*fd).expect("Cannot close duplicated fd");
-                        },
+                        }
                         Err(err) => {
                             panic!("{}: fcntl: {}", env!("CARGO_PKG_NAME"), err)
                         }
@@ -512,30 +488,27 @@ impl<'a> InputInterpreter<'a> {
             let stat_res = unsafe { wasi::fd_fdstat_get(fd_dst as Fd) };
 
             #[cfg(not(target_os = "wasi"))]
-            let stat_res = nix::fcntl::fcntl(
-                fd_dst,
-                nix::fcntl::F_GETFD
-            );
+            let stat_res = nix::fcntl::fcntl(fd_dst, nix::fcntl::F_GETFD);
 
             match stat_res {
-                Ok(_) if fd_dst != fd_src  => {
+                Ok(_) if fd_dst != fd_src => {
                     // Make copy of fd
                     #[cfg(target_os = "wasi")]
                     let move_res = wasi_ext_lib::fcntl(
                         fd_dst,
-                        wasi_ext_lib::FcntlCommand::F_MVFD { min_fd_num: 10 }
+                        wasi_ext_lib::FcntlCommand::F_MVFD { min_fd_num: 10 },
                     );
 
                     #[cfg(not(target_os = "wasi"))]
-                    let move_res = nix::fcntl::fcntl(
-                        fd_dst,
-                        nix::fcntl::F_DUPFD(10)
-                    );
+                    let move_res = nix::fcntl::fcntl(fd_dst, nix::fcntl::F_DUPFD(10));
 
                     match move_res {
                         Ok(saved_fd) => {
-                            fds_to_restore.push(SavedFd::Move { fd_src: saved_fd as Fd, fd_dst });
-                        },
+                            fds_to_restore.push(SavedFd::Move {
+                                fd_src: saved_fd as Fd,
+                                fd_dst,
+                            });
+                        }
                         Err(err) => {
                             panic!("{}: fcntl: {}", env!("CARGO_PKG_NAME"), err)
                         }
@@ -775,7 +748,7 @@ impl<'a> InputInterpreter<'a> {
                         redirects.push(redirect);
                     }
                     None
-                },
+                }
             })
             .collect::<HashMap<_, _>>();
 
@@ -914,11 +887,9 @@ impl<'a> InputInterpreter<'a> {
                         "-" => Some(Redirect::Close(fd_dst as Fd)),
                         fd => {
                             if let Ok(fd_src) = fd.parse::<Fd>() {
-                                Some(Redirect::Duplicate{ fd_src, fd_dst })
+                                Some(Redirect::Duplicate { fd_src, fd_dst })
                             } else {
-                                eprintln!(
-                                    "DupRead redirect cannot be parsed: {top_level_word:?}"
-                                );
+                                eprintln!("DupRead redirect cannot be parsed: {top_level_word:?}");
                                 None
                             }
                         }
@@ -934,11 +905,9 @@ impl<'a> InputInterpreter<'a> {
                         "-" => Some(Redirect::Close(fd_dst as Fd)),
                         fd => {
                             if let Ok(fd_src) = fd.parse::<Fd>() {
-                                Some(Redirect::Duplicate{ fd_src, fd_dst })
+                                Some(Redirect::Duplicate { fd_src, fd_dst })
                             } else {
-                                eprintln!(
-                                    "DupWrite redirect cannot be parsed: {top_level_word:?}"
-                                );
+                                eprintln!("DupWrite redirect cannot be parsed: {top_level_word:?}");
                                 None
                             }
                         }

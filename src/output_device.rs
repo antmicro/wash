@@ -5,12 +5,12 @@
  */
 
 // #[cfg(target_os = "wasi")]
-use crate::shell_base::{Fd, Redirect, STDOUT, STDERR};
+use crate::shell_base::{Fd, Redirect, STDERR, STDOUT};
 
 use color_eyre::Report;
 use std::fs::{File, OpenOptions};
-use std::os::fd::{FromRawFd, IntoRawFd, RawFd};
 use std::io::Write;
+use std::os::fd::{FromRawFd, IntoRawFd, RawFd};
 
 #[derive(Debug)]
 /// Wrapper for stdout/stderr operations from shell builtins so that they are redirects-aware
@@ -19,6 +19,12 @@ pub struct OutputDevice<'a> {
     stderr_redirect: Option<&'a Redirect>,
     stdout_data: String,
     stderr_data: String,
+}
+
+impl<'a> Default for OutputDevice<'a> {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl<'a> OutputDevice<'a> {
@@ -59,65 +65,57 @@ impl<'a> OutputDevice<'a> {
 
         let mut finall_file = match redirect {
             None => unsafe { File::from_raw_fd(to_fd as RawFd) },
-            Some(Redirect::Write(_, path))  => {
-                OpenOptions::new()
-                    .write(true)
-                    .truncate(true)
-                    .create(true)
-                    .open(path)?
-                
-            }
-            Some(Redirect::Append(_, path)) => {
-                OpenOptions::new()
-                    .write(true)
-                    .append(true)
-                    .create(true)
-                    .open(path)?
-            }
+            Some(Redirect::Write(_, path)) => OpenOptions::new()
+                .write(true)
+                .truncate(true)
+                .create(true)
+                .open(path)?,
+            Some(Redirect::Append(_, path)) => OpenOptions::new()
+                .write(true)
+                .append(true)
+                .create(true)
+                .open(path)?,
             Some(Redirect::ReadWrite(_, path)) => {
-                OpenOptions::new()
-                    .write(true)
-                    .create(true)
-                    .open(path)?
+                OpenOptions::new().write(true).create(true).open(path)?
             }
-            Some(Redirect::PipeOut(fd)) => {
-                unsafe { File::from_raw_fd(*fd as RawFd) }
-            }
-            Some(Redirect::Duplicate { fd_src, fd_dst: _ }) => {
-                unsafe { File::from_raw_fd(*fd_src as RawFd) }
-            }
-            Some(Redirect::Read(_, _)) |
-            Some(Redirect::PipeIn(_)) |
-            Some(Redirect::Close(_)) => {
-                return Err(Report::msg(
-                format!(
-                        "Wrong redirection type '{:?}' for writing.",
-                        redirect.unwrap()
-                    )
-                ));
+            Some(Redirect::PipeOut(fd)) => unsafe { File::from_raw_fd(*fd as RawFd) },
+            Some(Redirect::Duplicate { fd_src, fd_dst: _ }) => unsafe {
+                File::from_raw_fd(*fd_src as RawFd)
+            },
+            Some(Redirect::Read(_, _)) | Some(Redirect::PipeIn(_)) | Some(Redirect::Close(_)) => {
+                return Err(Report::msg(format!(
+                    "Wrong redirection type '{:?}' for writing.",
+                    redirect.unwrap()
+                )));
             }
         };
 
         let res = write!(finall_file, "{}", output);
         finall_file.flush().unwrap();
         match redirect {
-            Some(Redirect::Write(_, _)) |
-            Some(Redirect::Append(_, _)) |
-            Some(Redirect::ReadWrite(_, _)) => {
+            Some(Redirect::Write(_, _))
+            | Some(Redirect::Append(_, _))
+            | Some(Redirect::ReadWrite(_, _)) => {
                 // Close opened file;
                 drop(finall_file);
             }
-            None |
-            Some(Redirect::PipeOut(_)) | 
-            Some(Redirect::Duplicate { fd_src: _, fd_dst: _ }) => {
+            None
+            | Some(Redirect::PipeOut(_))
+            | Some(Redirect::Duplicate {
+                fd_src: _,
+                fd_dst: _,
+            }) => {
                 // Leave fd opened
                 let _ = finall_file.into_raw_fd();
             }
-            _ => unreachable!()
+            _ => unreachable!(),
         }
 
         if let Err(err) = res {
-            Err(Report::msg(format!("Cannot write to file descriptor in output device: {}", err)))
+            Err(Report::msg(format!(
+                "Cannot write to file descriptor in output device: {}",
+                err
+            )))
         } else {
             Ok(())
         }
