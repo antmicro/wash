@@ -579,12 +579,12 @@ impl<'a> InputInterpreter<'a> {
                         }
                     }
 
-                    for word in finall_list {
+                    'outer: for word in finall_list {
                         env::set_var(var, word);
                         for command in body {
                             exit_status = self.handle_top_level_command(shell, command);
                             if exit_status == EXIT_INTERRUPTED {
-                                return exit_status;
+                                break 'outer;
                             }
                         }
                     }
@@ -596,19 +596,18 @@ impl<'a> InputInterpreter<'a> {
                 else_branch,
             } => {
                 let mut exit_status = EXIT_SUCCESS;
-                let mut guard_exit = EXIT_FAILURE;
-                for guard_body in conditionals {
+                'outer: for guard_body in conditionals {
                     for command in &guard_body.guard {
-                        guard_exit = self.handle_top_level_command(shell, command);
-                        if guard_exit == EXIT_INTERRUPTED {
-                            return guard_exit;
+                        exit_status = self.handle_top_level_command(shell, command);
+                        if exit_status == EXIT_INTERRUPTED {
+                            break 'outer;
                         }
                     }
-                    if guard_exit == EXIT_SUCCESS {
+                    if exit_status == EXIT_SUCCESS {
                         for command in &guard_body.body {
                             exit_status = self.handle_top_level_command(shell, command);
                             if exit_status == EXIT_INTERRUPTED {
-                                return exit_status;
+                                break 'outer;
                             }
                         }
                         break;
@@ -616,39 +615,42 @@ impl<'a> InputInterpreter<'a> {
                         shell.last_exit_status = EXIT_SUCCESS;
                     }
                 }
-                if guard_exit != EXIT_SUCCESS {
+                if exit_status != EXIT_SUCCESS {
                     if let Some(els) = else_branch {
                         for command in els {
                             exit_status = self.handle_top_level_command(shell, command);
                             if exit_status == EXIT_INTERRUPTED {
-                                return exit_status;
+                                break;
                             }
                         }
                     }
                 };
                 exit_status
             }
-            ast::CompoundCommandKind::While(guard_body) => loop {
-                let mut guard_status = EXIT_SUCCESS;
-                for cmd in guard_body.guard.iter() {
-                    guard_status = self.handle_top_level_command(shell, cmd);
-                    if guard_status == EXIT_INTERRUPTED {
-                        return guard_status;
+            ast::CompoundCommandKind::While(guard_body) => {
+                let mut exit_status = EXIT_SUCCESS;
+                'outer: loop {
+                    for cmd in guard_body.guard.iter() {
+                        exit_status = self.handle_top_level_command(shell, cmd);
+                        if exit_status == EXIT_INTERRUPTED {
+                            break 'outer;
+                        }
+                    }
+
+                    if exit_status != EXIT_SUCCESS {
+                        shell.last_exit_status = EXIT_SUCCESS;
+                        break 'outer;
+                    }
+
+                    for cmd in guard_body.body.iter() {
+                        exit_status = self.handle_top_level_command(shell, cmd);
+                        if exit_status == EXIT_INTERRUPTED {
+                            break 'outer;
+                        }
                     }
                 }
-
-                if guard_status != EXIT_SUCCESS {
-                    shell.last_exit_status = EXIT_SUCCESS;
-                    return EXIT_SUCCESS;
-                }
-
-                for cmd in guard_body.body.iter() {
-                    let body_status = self.handle_top_level_command(shell, cmd);
-                    if body_status == EXIT_INTERRUPTED {
-                        return body_status;
-                    }
-                }
-            },
+                exit_status
+            }
             ast::CompoundCommandKind::Case { word, arms } => {
                 let mut exit_status = EXIT_SUCCESS;
                 let handled_word = self
@@ -676,7 +678,7 @@ impl<'a> InputInterpreter<'a> {
                         for command in arm.body.iter() {
                             exit_status = self.handle_top_level_command(shell, command);
                             if exit_status == EXIT_INTERRUPTED {
-                                return exit_status;
+                                break;
                             }
                         }
                         break;
