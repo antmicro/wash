@@ -596,26 +596,28 @@ impl<'a> InputInterpreter<'a> {
                 else_branch,
             } => {
                 let mut exit_status = EXIT_SUCCESS;
+                let mut guard_status = EXIT_SUCCESS;
                 'outer: for guard_body in conditionals {
                     for command in &guard_body.guard {
-                        exit_status = self.handle_top_level_command(shell, command);
-                        if exit_status == EXIT_INTERRUPTED {
+                        guard_status = self.handle_top_level_command(shell, command);
+                        if guard_status == EXIT_INTERRUPTED {
+                            exit_status = guard_status;
                             break 'outer;
                         }
                     }
-                    if exit_status == EXIT_SUCCESS {
+                    if guard_status == EXIT_SUCCESS {
                         for command in &guard_body.body {
                             exit_status = self.handle_top_level_command(shell, command);
                             if exit_status == EXIT_INTERRUPTED {
                                 break 'outer;
                             }
                         }
-                        break;
+                        break 'outer;
                     } else {
                         shell.last_exit_status = EXIT_SUCCESS;
                     }
                 }
-                if exit_status != EXIT_SUCCESS {
+                if guard_status != EXIT_SUCCESS && guard_status != EXIT_INTERRUPTED {
                     if let Some(els) = else_branch {
                         for command in els {
                             exit_status = self.handle_top_level_command(shell, command);
