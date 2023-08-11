@@ -8,10 +8,8 @@ use std::collections::HashMap;
 use std::env;
 #[cfg(target_os = "wasi")]
 use std::fs;
-#[cfg(not(target_os = "wasi"))]
-use std::os::fd::AsRawFd;
-#[cfg(not(target_os = "wasi"))]
-use std::os::unix::prelude::RawFd;
+use std::fs::OpenOptions;
+use std::os::fd::IntoRawFd;
 #[cfg(target_os = "wasi")]
 use std::path::Path;
 use std::path::PathBuf;
@@ -23,17 +21,22 @@ use conch_parser::parse::{DefaultParser, ParseError};
 use glob::Pattern;
 
 #[cfg(not(target_os = "wasi"))]
-use nix::{
-    sys::wait::{waitpid, WaitStatus},
-    unistd::{fork, ForkResult},
-};
+use nix;
 
 use crate::shell_base::{
-    Redirect, Shell, EXIT_FAILURE, EXIT_INTERRUPTED, EXIT_SUCCESS, STDIN, STDOUT,
+    preprocess_redirects, Fd, Redirect, Shell, EXIT_FAILURE, EXIT_INTERRUPTED, EXIT_SUCCESS, STDIN,
+    STDOUT,
 };
 
+use crate::output_device::OutputDevice;
+
 #[cfg(not(target_os = "wasi"))]
-use crate::shell_base::{preprocess_redirects, OpenedFd, STDERR};
+use crate::shell_base::{apply_redirects, wait_for_child};
+
+enum SavedFd {
+    Move { fd_src: Fd, fd_dst: Fd },
+    Close { fd: Fd },
+}
 
 pub struct InputInterpreter<'a> {
     input: &'a str,
@@ -155,92 +158,127 @@ impl<'a> InputInterpreter<'a> {
         cmds: &[ast::DefaultPipeableCommand],
         background: bool,
     ) -> i32 {
-        #[cfg(target_os = "wasi")]
         let exit_status = {
+            #[cfg(target_os = "wasi")]
+            // TODO: name of the virtual file should be uniquely generated
+            // TODO: add virtual mode that won't create files but in-memory strings
+            let fd_writer = OpenOptions::new()
+                .write(true)
+                .create(true)
+                .truncate(true)
+                .open("/proc/pipe0.txt")
+                .expect("Cannot create pipe")
+                .into_raw_fd() as Fd;
+
+            #[cfg(not(target_os = "wasi"))]
+            let (fd_reader, fd_writer) = {
+                let pipe = os_pipe::pipe().expect("Cannot create pipe.");
+                (pipe.0.into_raw_fd() as Fd, pipe.1.into_raw_fd() as Fd)
+            };
+
             let mut exit_code = self.handle_pipeable_command(
                 shell,
                 &cmds[0],
                 background,
-                // TODO: name of the virtual file should be uniquely generated
-                // TODO: add virtual mode that won't create files but in-memory strings
-                &mut vec![Redirect::Write((STDOUT, "/proc/pipe0.txt".to_string()))],
+                &mut vec![Redirect::PipeOut(fd_writer)],
             );
+
+            #[cfg(target_os = "wasi")]
+            unsafe { wasi::fd_close(fd_writer) }.expect("Cannot close pipe write end!");
+
+            #[cfg(not(target_os = "wasi"))]
+            let mut saved_reader = fd_reader;
+            #[cfg(not(target_os = "wasi"))]
+            nix::unistd::close(fd_writer).expect("Cannot close pipe write end!");
 
             for (i, cmd) in cmds.iter().enumerate().skip(1).take(cmds.len() - 2) {
                 if exit_code == EXIT_INTERRUPTED {
                     break;
                 }
 
+                let (fd_reader, fd_writer) = {
+                    #[cfg(target_os = "wasi")]
+                    {
+                        let read_end = OpenOptions::new()
+                            .read(true)
+                            .open(format!("/proc/pipe{}.txt", i - 1))
+                            .expect("Cannot create pipe read end!");
+                        let write_end = OpenOptions::new()
+                            .write(true)
+                            .create(true)
+                            .truncate(true)
+                            .open(format!("/proc/pipe{i}.txt"))
+                            .expect("Cannot create pipe write end!");
+
+                        (read_end.into_raw_fd() as Fd, write_end.into_raw_fd() as Fd)
+                    }
+
+                    #[cfg(not(target_os = "wasi"))]
+                    {
+                        let _ = i;
+                        let pipe = os_pipe::pipe().expect("Cannot create pipe.");
+                        let fds = (saved_reader, pipe.1.into_raw_fd() as Fd);
+                        saved_reader = pipe.0.into_raw_fd() as Fd;
+                        fds
+                    }
+                };
+
                 exit_code = self.handle_pipeable_command(
                     shell,
                     cmd,
                     background,
-                    &mut vec![
-                        Redirect::Read((STDIN, format!("/proc/pipe{}.txt", i - 1))),
-                        Redirect::Write((STDOUT, format!("/proc/pipe{i}.txt"))),
-                    ],
+                    &mut vec![Redirect::PipeIn(fd_reader), Redirect::PipeOut(fd_writer)],
                 );
+
+                // Close reader and writer
+                #[cfg(target_os = "wasi")]
+                unsafe {
+                    wasi::fd_close(fd_reader).expect("Cannot close pipe read end!");
+                    wasi::fd_close(fd_writer).expect("Cannot close pipe write end!");
+                }
+                #[cfg(not(target_os = "wasi"))]
+                {
+                    nix::unistd::close(fd_reader).expect("Cannot close pipe read end!");
+                    nix::unistd::close(fd_writer).expect("Cannot close pipe write end!");
+                }
             }
 
             if exit_code != EXIT_INTERRUPTED {
+                let fd_reader = {
+                    #[cfg(target_os = "wasi")]
+                    {
+                        OpenOptions::new()
+                            .read(true)
+                            .open(format!("/proc/pipe{}.txt", cmds.len() - 2))
+                            .expect("Cannot create pipe")
+                            .into_raw_fd() as Fd
+                    }
+
+                    #[cfg(not(target_os = "wasi"))]
+                    saved_reader
+                };
+
                 exit_code = self.handle_pipeable_command(
                     shell,
                     cmds.last().unwrap(),
                     background,
-                    &mut vec![Redirect::Read((
-                        STDIN,
-                        format!("/proc/pipe{}.txt", cmds.len() - 2),
-                    ))],
+                    &mut vec![Redirect::PipeIn(fd_reader)],
                 );
+
+                #[cfg(target_os = "wasi")]
+                unsafe { wasi::fd_close(fd_reader) }.expect("Cannot close pipe read end!");
+                #[cfg(not(target_os = "wasi"))]
+                nix::unistd::close(fd_reader).expect("Cannot close pipe write end!");
             }
 
             // TODO: temporary solution before in-memory files get implemented
+            #[cfg(target_os = "wasi")]
             for i in 0..cmds.len() - 1 {
                 let pipe_name = format!("/proc/pipe{i}.txt");
                 if Path::new(pipe_name.as_str()).exists() {
                     fs::remove_file(pipe_name.as_str()).unwrap();
                 }
             }
-            exit_code
-        };
-
-        #[cfg(not(target_os = "wasi"))]
-        let exit_status = {
-            let (mut reader, mut writer) = os_pipe::pipe().unwrap();
-            let mut exit_code = self.handle_pipeable_command(
-                shell,
-                &cmds[0],
-                background,
-                &mut vec![Redirect::PipeOut(Some(writer))],
-            );
-
-            for cmd in cmds.iter().skip(1).take(cmds.len() - 2) {
-                if exit_code == EXIT_INTERRUPTED {
-                    break;
-                }
-
-                let prev_reader = reader;
-                (reader, writer) = os_pipe::pipe().unwrap();
-                exit_code = self.handle_pipeable_command(
-                    shell,
-                    cmd,
-                    background,
-                    &mut vec![
-                        Redirect::PipeIn(Some(prev_reader)),
-                        Redirect::PipeOut(Some(writer)),
-                    ],
-                );
-            }
-
-            if exit_code != EXIT_INTERRUPTED {
-                exit_code = self.handle_pipeable_command(
-                    shell,
-                    cmds.last().unwrap(),
-                    background,
-                    &mut vec![Redirect::PipeIn(Some(reader))],
-                );
-            }
-
             exit_code
         };
 
@@ -281,117 +319,238 @@ impl<'a> InputInterpreter<'a> {
         redirects: &mut Vec<Redirect>,
     ) -> i32 {
         let ast::CompoundCommand { kind, io } = cmd;
-        for redirect_type in io {
+
+        for redirect_type in io.iter() {
             if let Some(redirect) = self.handle_redirect_type(shell, redirect_type) {
                 redirects.push(redirect);
+            } else {
+                eprintln!("{}: cannot handle redirect!", env!("CARGO_PKG_NAME"));
+                return EXIT_FAILURE;
+            };
+        }
+
+        let mut output_device = OutputDevice::new();
+        if let Err(err) = preprocess_redirects(redirects, &mut output_device) {
+            output_device.eprintln(format!("{}: {}", env!("CARGO_PKG_NAME"), err).as_str());
+            if let Err(err) = output_device.flush() {
+                eprintln!("Cannot flush output_device: {}", err)
+            }
+            return EXIT_FAILURE;
+        }
+
+        #[cfg(target_os = "wasi")]
+        if let ast::CompoundCommandKind::Subshell {
+            body: _,
+            start_pos,
+            end_pos,
+        } = kind
+        {
+            let subshell_cmds = &self.input[(start_pos.byte + 1)..(end_pos.byte)];
+
+            let mut args_vec = vec!["-c".to_string(), subshell_cmds.to_string()];
+
+            return match shell.execute_command(
+                "wash",
+                &mut args_vec,
+                &HashMap::new(),
+                background,
+                redirects,
+            ) {
+                Ok(result) => result,
+                Err(error) => {
+                    eprintln!("{} error: {:?}", env!("CARGO_PKG_NAME"), error);
+                    EXIT_FAILURE
+                }
+            };
+        }
+
+        #[cfg(not(target_os = "wasi"))]
+        if let ast::CompoundCommandKind::Subshell {
+            body,
+            start_pos: _,
+            end_pos: _,
+        } = kind
+        {
+            match unsafe { nix::unistd::fork() } {
+                Ok(nix::unistd::ForkResult::Parent { child }) => {
+                    return if !background {
+                        wait_for_child(child)
+                    } else {
+                        EXIT_SUCCESS
+                    };
+                }
+                Ok(nix::unistd::ForkResult::Child) => {
+                    // Apply all redirects passed to subshell
+                    if let Err(err) = apply_redirects(redirects) {
+                        eprintln!("{}: {}", env!("CARGO_PKG_NAME"), err);
+                        std::process::exit(EXIT_FAILURE);
+                    }
+
+                    let mut exit_status = EXIT_SUCCESS;
+
+                    // Run subshell commands
+                    for subshell_cmd in body {
+                        exit_status = self.handle_top_level_command(shell, subshell_cmd);
+                        if exit_status == EXIT_INTERRUPTED {
+                            break;
+                        }
+                    }
+
+                    std::process::exit(exit_status);
+                }
+                Err(err) => {
+                    eprintln!(
+                        "{} error: subshell fork failed: {}",
+                        env!("CARGO_PKG_NAME"),
+                        err
+                    );
+                    return EXIT_FAILURE;
+                }
             }
         }
-        match kind {
+
+        // fds_to_restore[i] = (src_fd, dst_fd); src_fd shoulde be greater than 9
+        let mut fds_to_restore: Vec<SavedFd> = Vec::new();
+
+        for redirect in redirects.iter() {
+            let (fd_src, fd_dst): (Fd, Fd) = match redirect {
+                Redirect::Read(fd, path)
+                | Redirect::Write(fd, path)
+                | Redirect::Append(fd, path)
+                | Redirect::ReadWrite(fd, path) => {
+                    let mut open_options = OpenOptions::new();
+                    match redirect {
+                        Redirect::Read(_, _) => {
+                            open_options.read(true);
+                        }
+                        Redirect::Write(_, _) => {
+                            open_options.write(true).truncate(true).create(true);
+                        }
+                        Redirect::Append(_, _) => {
+                            open_options.write(true).append(true).create(true);
+                        }
+                        Redirect::ReadWrite(_, _) => {
+                            open_options.read(true).write(true).create(true);
+                        }
+                        _ => unreachable!(),
+                    };
+
+                    let opened_fd = match open_options.open(path) {
+                        Ok(file) => {
+                            // After this line, user is responsible for closing fd
+                            file.into_raw_fd() as Fd
+                        }
+                        Err(err) => {
+                            output_device.eprintln(
+                                format!("{}: {}: {}", env!("CARGO_PKG_NAME"), path, err).as_str(),
+                            );
+                            if let Err(err) = output_device.flush() {
+                                eprintln!("Cannot flush output_device: {}", err)
+                            }
+                            return EXIT_FAILURE;
+                        }
+                    };
+
+                    (opened_fd, *fd)
+                }
+                Redirect::PipeIn(fd) => (*fd, STDIN),
+                Redirect::PipeOut(fd) => (*fd, STDOUT),
+                Redirect::Duplicate { fd_src, fd_dst } => (*fd_src, *fd_dst),
+                Redirect::Close(fd) => {
+                    #[cfg(target_os = "wasi")]
+                    let move_res = wasi_ext_lib::fcntl(
+                        *fd,
+                        wasi_ext_lib::FcntlCommand::F_MVFD { min_fd_num: 10 },
+                    );
+
+                    #[cfg(not(target_os = "wasi"))]
+                    let move_res = nix::fcntl::fcntl(*fd, nix::fcntl::F_DUPFD(10));
+
+                    match move_res {
+                        Ok(saved_fd) => {
+                            fds_to_restore.push(SavedFd::Move {
+                                fd_src: saved_fd as Fd,
+                                fd_dst: *fd,
+                            });
+                            #[cfg(not(target_os = "wasi"))]
+                            nix::unistd::close(*fd).expect("Cannot close duplicated fd");
+                        }
+                        Err(err) => {
+                            panic!("{}: fcntl: {}", env!("CARGO_PKG_NAME"), err)
+                        }
+                    }
+
+                    continue;
+                }
+            };
+
             #[cfg(target_os = "wasi")]
+            let stat_res = unsafe { wasi::fd_fdstat_get(fd_dst as Fd) };
+
+            #[cfg(not(target_os = "wasi"))]
+            let stat_res = nix::fcntl::fcntl(fd_dst, nix::fcntl::F_GETFD);
+
+            match stat_res {
+                Ok(_) if fd_dst != fd_src => {
+                    // Make copy of fd
+                    #[cfg(target_os = "wasi")]
+                    let move_res = wasi_ext_lib::fcntl(
+                        fd_dst,
+                        wasi_ext_lib::FcntlCommand::F_MVFD { min_fd_num: 10 },
+                    );
+
+                    #[cfg(not(target_os = "wasi"))]
+                    let move_res = nix::fcntl::fcntl(fd_dst, nix::fcntl::F_DUPFD(10));
+
+                    match move_res {
+                        Ok(saved_fd) => {
+                            fds_to_restore.push(SavedFd::Move {
+                                fd_src: saved_fd as Fd,
+                                fd_dst,
+                            });
+                        }
+                        Err(err) => {
+                            panic!("{}: fcntl: {}", env!("CARGO_PKG_NAME"), err)
+                        }
+                    }
+                }
+                Ok(_) => {
+                    // Case when file is already opened on dst_fd, skip fd_renumber
+                    fds_to_restore.push(SavedFd::Close { fd: fd_dst });
+                    continue;
+                }
+                #[cfg(target_os = "wasi")]
+                Err(wasi::ERRNO_BADF) => {
+                    // We can make redirect without saving fd
+                    fds_to_restore.push(SavedFd::Close { fd: fd_dst });
+                }
+                #[cfg(not(target_os = "wasi"))]
+                Err(nix::errno::Errno::EBADF) => {
+                    // We can make redirect without saving fd
+                    fds_to_restore.push(SavedFd::Close { fd: fd_dst });
+                }
+                Err(err) => {
+                    panic!("{}: fd_fdstat_get: {}", env!("CARGO_PKG_NAME"), err)
+                }
+            }
+
+            #[cfg(target_os = "wasi")]
+            if let Err(err) = unsafe { wasi::fd_renumber(fd_src, fd_dst) } {
+                panic!("{}: fd_renumber: {}", env!("CARGO_PKG_NAME"), err);
+            }
+
+            #[cfg(not(target_os = "wasi"))]
+            if let Err(err) = nix::unistd::dup2(fd_src, fd_dst) {
+                panic!("{}: dup2: {}", env!("CARGO_PKG_NAME"), err);
+            }
+        }
+
+        let exit_status = match kind {
             ast::CompoundCommandKind::Subshell {
                 body: _,
-                start_pos,
-                end_pos,
-            } => {
-                let subshell_cmds = &self.input[(start_pos.byte + 1)..(end_pos.byte)];
-
-                let mut args_vec = vec!["-c".to_string(), subshell_cmds.to_string()];
-
-                match shell.execute_command(
-                    "wash",
-                    &mut args_vec,
-                    &HashMap::new(),
-                    background,
-                    redirects,
-                ) {
-                    Ok(result) => result,
-                    Err(error) => {
-                        eprintln!("{} error: {:?}", env!("CARGO_PKG_NAME"), error);
-                        EXIT_FAILURE
-                    }
-                }
-            }
-            #[cfg(not(target_os = "wasi"))]
-            ast::CompoundCommandKind::Subshell {
-                body,
                 start_pos: _,
                 end_pos: _,
-            } => {
-                match unsafe { fork() } {
-                    Ok(ForkResult::Parent { child }) => {
-                        let mut exit_status = EXIT_SUCCESS;
-                        if !background {
-                            let wait_status = waitpid(child, None).unwrap_or_else(|_| {
-                                panic!(
-                                    "{}: waitpid for subshell command error",
-                                    env!("CARGO_PKG_NAME")
-                                )
-                            });
-
-                            loop {
-                                match wait_status {
-                                    WaitStatus::Exited(waited_pid, exit_code)
-                                        if waited_pid == child =>
-                                    {
-                                        exit_status = exit_code;
-                                        break;
-                                    }
-                                    WaitStatus::Exited(_, _) => {
-                                        continue;
-                                    }
-                                    _ => unreachable!(),
-                                }
-                            }
-                        }
-                        exit_status
-                    }
-                    Ok(ForkResult::Child) => {
-                        // Apply all redirects passed to subshell
-                        let (opened_fds, status) = preprocess_redirects(redirects);
-                        if let Err(e) = status {
-                            eprintln!("{}: {}", env!("CARGO_PKG_NAME"), e);
-                            std::process::exit(EXIT_FAILURE);
-                        }
-
-                        for (fd, target) in opened_fds.iter() {
-                            let (source, target) = match target {
-                                OpenedFd::File { file, writable: _ } => (file.as_raw_fd(), *fd),
-                                OpenedFd::PipeReader(pipe) => (pipe.as_raw_fd(), *fd),
-                                OpenedFd::PipeWriter(pipe) => (pipe.as_raw_fd(), *fd),
-                                OpenedFd::StdIn => (STDIN as i32, *fd),
-                                OpenedFd::StdOut => (STDOUT as i32, *fd),
-                                OpenedFd::StdErr => (STDERR as i32, *fd),
-                            };
-                            if source != target {
-                                nix::unistd::dup2(source, target)
-                                    .expect("Cannot duplicate fd before subshell execution!");
-                                nix::unistd::close(source)
-                                    .expect("Cannot duplicate fd before subshell execution!");
-                            }
-                        }
-
-                        let mut exit_status = EXIT_SUCCESS;
-
-                        // Run subshell commands
-                        for subshell_cmd in body {
-                            exit_status = self.handle_top_level_command(shell, subshell_cmd);
-                            if exit_status == EXIT_INTERRUPTED {
-                                break;
-                            }
-                        }
-
-                        std::process::exit(exit_status);
-                    }
-                    Err(err) => {
-                        eprintln!(
-                            "{} error: subshell fork failed: {}",
-                            env!("CARGO_PKG_NAME"),
-                            err
-                        );
-                        EXIT_FAILURE
-                    }
-                }
-            }
+            } => unreachable!(),
             ast::CompoundCommandKind::For { var, words, body } => {
                 let mut exit_status = EXIT_SUCCESS;
                 if let Some(for_list) = words {
@@ -420,12 +579,12 @@ impl<'a> InputInterpreter<'a> {
                         }
                     }
 
-                    for word in finall_list {
+                    'outer: for word in finall_list {
                         env::set_var(var, word);
                         for command in body {
                             exit_status = self.handle_top_level_command(shell, command);
                             if exit_status == EXIT_INTERRUPTED {
-                                return exit_status;
+                                break 'outer;
                             }
                         }
                     }
@@ -437,59 +596,63 @@ impl<'a> InputInterpreter<'a> {
                 else_branch,
             } => {
                 let mut exit_status = EXIT_SUCCESS;
-                let mut guard_exit = EXIT_FAILURE;
-                for guard_body in conditionals {
+                let mut guard_status = EXIT_SUCCESS;
+                'outer: for guard_body in conditionals {
                     for command in &guard_body.guard {
-                        guard_exit = self.handle_top_level_command(shell, command);
-                        if guard_exit == EXIT_INTERRUPTED {
-                            return guard_exit;
+                        guard_status = self.handle_top_level_command(shell, command);
+                        if guard_status == EXIT_INTERRUPTED {
+                            exit_status = guard_status;
+                            break 'outer;
                         }
                     }
-                    if guard_exit == EXIT_SUCCESS {
+                    if guard_status == EXIT_SUCCESS {
                         for command in &guard_body.body {
                             exit_status = self.handle_top_level_command(shell, command);
                             if exit_status == EXIT_INTERRUPTED {
-                                return exit_status;
+                                break 'outer;
                             }
                         }
-                        break;
+                        break 'outer;
                     } else {
                         shell.last_exit_status = EXIT_SUCCESS;
                     }
                 }
-                if guard_exit != EXIT_SUCCESS {
+                if guard_status != EXIT_SUCCESS && guard_status != EXIT_INTERRUPTED {
                     if let Some(els) = else_branch {
                         for command in els {
                             exit_status = self.handle_top_level_command(shell, command);
                             if exit_status == EXIT_INTERRUPTED {
-                                return exit_status;
+                                break;
                             }
                         }
                     }
                 };
                 exit_status
             }
-            ast::CompoundCommandKind::While(guard_body) => loop {
-                let mut guard_status = EXIT_SUCCESS;
-                for cmd in guard_body.guard.iter() {
-                    guard_status = self.handle_top_level_command(shell, cmd);
-                    if guard_status == EXIT_INTERRUPTED {
-                        return guard_status;
+            ast::CompoundCommandKind::While(guard_body) => {
+                let mut exit_status = EXIT_SUCCESS;
+                'outer: loop {
+                    for cmd in guard_body.guard.iter() {
+                        exit_status = self.handle_top_level_command(shell, cmd);
+                        if exit_status == EXIT_INTERRUPTED {
+                            break 'outer;
+                        }
+                    }
+
+                    if exit_status != EXIT_SUCCESS {
+                        shell.last_exit_status = EXIT_SUCCESS;
+                        break 'outer;
+                    }
+
+                    for cmd in guard_body.body.iter() {
+                        exit_status = self.handle_top_level_command(shell, cmd);
+                        if exit_status == EXIT_INTERRUPTED {
+                            break 'outer;
+                        }
                     }
                 }
-
-                if guard_status != EXIT_SUCCESS {
-                    shell.last_exit_status = EXIT_SUCCESS;
-                    return EXIT_SUCCESS;
-                }
-
-                for cmd in guard_body.body.iter() {
-                    let body_status = self.handle_top_level_command(shell, cmd);
-                    if body_status == EXIT_INTERRUPTED {
-                        return body_status;
-                    }
-                }
-            },
+                exit_status
+            }
             ast::CompoundCommandKind::Case { word, arms } => {
                 let mut exit_status = EXIT_SUCCESS;
                 let handled_word = self
@@ -517,7 +680,7 @@ impl<'a> InputInterpreter<'a> {
                         for command in arm.body.iter() {
                             exit_status = self.handle_top_level_command(shell, command);
                             if exit_status == EXIT_INTERRUPTED {
-                                return exit_status;
+                                break;
                             }
                         }
                         break;
@@ -529,7 +692,40 @@ impl<'a> InputInterpreter<'a> {
                 eprintln!("CompoundCommandKind not yet handled: {any:#?}");
                 EXIT_FAILURE
             }
+        };
+
+        // restore saved fds in reversed order
+        for saved_fd in fds_to_restore.into_iter().rev() {
+            match saved_fd {
+                SavedFd::Move { fd_src, fd_dst } => {
+                    #[cfg(target_os = "wasi")]
+                    if let Err(err) = unsafe { wasi::fd_renumber(fd_src, fd_dst) } {
+                        panic!("{}: fd_renumber: {}", env!("CARGO_PKG_NAME"), err);
+                    } else if let Err(err) = unsafe { wasi::fd_close(fd_src) } {
+                        panic!("{}: fd_close: {}", env!("CARGO_PKG_NAME"), err);
+                    }
+
+                    #[cfg(not(target_os = "wasi"))]
+                    if let Err(err) = nix::unistd::dup2(fd_src, fd_dst) {
+                        panic!("{}: dup2: {}", env!("CARGO_PKG_NAME"), err);
+                    } else if let Err(err) = nix::unistd::close(fd_src) {
+                        panic!("{}: close: {}", env!("CARGO_PKG_NAME"), err);
+                    }
+                }
+                SavedFd::Close { fd } => {
+                    #[cfg(target_os = "wasi")]
+                    if let Err(err) = unsafe { wasi::fd_close(fd as Fd) } {
+                        panic!("{}: fd_close: {}", env!("CARGO_PKG_NAME"), err);
+                    }
+                    #[cfg(not(target_os = "wasi"))]
+                    if let Err(err) = nix::unistd::close(fd) {
+                        panic!("{}: close: {}", env!("CARGO_PKG_NAME"), err);
+                    }
+                }
+            }
         }
+
+        exit_status
     }
 
     fn handle_simple_command(
@@ -550,7 +746,13 @@ impl<'a> InputInterpreter<'a> {
                     };
                     value.map(|value| (key.clone(), value))
                 }
-                _ => None,
+                ast::RedirectOrEnvVar::Redirect(redirect_type) => {
+                    // TODO: in case of None break execution?
+                    if let Some(redirect) = self.handle_redirect_type(shell, redirect_type) {
+                        redirects.push(redirect);
+                    }
+                    None
+                }
             })
             .collect::<HashMap<_, _>>();
 
@@ -558,6 +760,7 @@ impl<'a> InputInterpreter<'a> {
         for redirect_or_cmd_word in &cmd.redirects_or_cmd_words {
             match redirect_or_cmd_word {
                 ast::RedirectOrCmdWord::Redirect(redirect_type) => {
+                    // TODO: in case of None break execution?
                     if let Some(redirect) = self.handle_redirect_type(shell, redirect_type) {
                         redirects.push(redirect);
                     }
@@ -599,7 +802,7 @@ impl<'a> InputInterpreter<'a> {
             match shell.execute_command(&args.remove(0), &mut args, &env, background, redirects) {
                 Ok(result) => result,
                 Err(error) => {
-                    eprintln!("{} error: {:?}", env!("CARGO_PKG_NAME"), error);
+                    eprintln!("{}: {:?}", env!("CARGO_PKG_NAME"), error);
                     EXIT_FAILURE
                 }
             }
@@ -637,71 +840,60 @@ impl<'a> InputInterpreter<'a> {
         match redirect_type {
             ast::Redirect::Write(file_descriptor, top_level_word) => {
                 // TODO: check noclobber option is set
-                let file_descriptor = file_descriptor.unwrap_or(STDOUT);
+                let file_descriptor = file_descriptor.map_or_else(|| STDOUT, |fd| fd as Fd);
                 if let Some(mut filename) = self.handle_top_level_word(shell, top_level_word) {
                     filename = get_absolute_path(filename);
-                    #[cfg(not(target_os = "wasi"))]
-                    let file_descriptor = file_descriptor as RawFd;
-                    Some(Redirect::Write((file_descriptor, filename)))
+                    Some(Redirect::Write(file_descriptor, filename))
                 } else {
                     None
                 }
             }
             ast::Redirect::Append(file_descriptor, top_level_word) => {
-                let file_descriptor = file_descriptor.unwrap_or(STDOUT);
+                let file_descriptor = file_descriptor.map_or_else(|| STDOUT, |fd| fd as Fd);
                 if let Some(mut filename) = self.handle_top_level_word(shell, top_level_word) {
                     filename = get_absolute_path(filename);
-                    #[cfg(not(target_os = "wasi"))]
-                    let file_descriptor = file_descriptor as RawFd;
-                    Some(Redirect::Append((file_descriptor, filename)))
+                    Some(Redirect::Append(file_descriptor, filename))
                 } else {
                     None
                 }
             }
             ast::Redirect::Read(file_descriptor, top_level_word) => {
-                let file_descriptor = file_descriptor.unwrap_or(STDIN);
+                let file_descriptor = file_descriptor.map_or_else(|| STDIN, |fd| fd as Fd);
                 if let Some(mut filename) = self.handle_top_level_word(shell, top_level_word) {
                     filename = get_absolute_path(filename);
-                    #[cfg(not(target_os = "wasi"))]
-                    let file_descriptor = file_descriptor as RawFd;
-                    Some(Redirect::Read((file_descriptor, filename)))
+                    Some(Redirect::Read(file_descriptor, filename))
                 } else {
                     None
                 }
             }
-            #[cfg(not(target_os = "wasi"))]
             ast::Redirect::ReadWrite(file_descriptor, top_level_word) => {
-                let file_descriptor = file_descriptor.unwrap_or(STDIN);
+                let file_descriptor = file_descriptor.map_or_else(|| STDIN, |fd| fd as Fd);
                 if let Some(mut filename) = self.handle_top_level_word(shell, top_level_word) {
                     filename = get_absolute_path(filename);
-                    Some(Redirect::ReadWrite((file_descriptor as RawFd, filename)))
+                    Some(Redirect::ReadWrite(file_descriptor, filename))
                 } else {
                     None
                 }
             }
-            #[cfg(not(target_os = "wasi"))]
             ast::Redirect::Clobber(file_descriptor, top_level_word) => {
-                let file_descriptor = file_descriptor.unwrap_or(STDOUT);
+                let file_descriptor = file_descriptor.map_or_else(|| STDOUT, |fd| fd as Fd);
                 if let Some(mut filename) = self.handle_top_level_word(shell, top_level_word) {
                     filename = get_absolute_path(filename);
-                    Some(Redirect::Write((file_descriptor as RawFd, filename)))
+                    Some(Redirect::Write(file_descriptor, filename))
                 } else {
                     None
                 }
             }
-            #[cfg(not(target_os = "wasi"))]
             ast::Redirect::DupRead(file_descriptor, top_level_word) => {
-                let fd_dest = file_descriptor.unwrap_or(STDIN);
+                let fd_dst = file_descriptor.map_or_else(|| STDIN, |fd| fd as Fd);
                 if let Some(fd) = self.handle_top_level_word(shell, top_level_word) {
                     match fd.as_str() {
-                        "-" => Some(Redirect::Close(fd_dest as RawFd)),
+                        "-" => Some(Redirect::Close(fd_dst as Fd)),
                         fd => {
-                            if let Ok(fd_source) = fd.parse::<u16>() {
-                                Some(Redirect::Duplicate((fd_dest as RawFd, fd_source as RawFd)))
+                            if let Ok(fd_src) = fd.parse::<Fd>() {
+                                Some(Redirect::Duplicate { fd_src, fd_dst })
                             } else {
-                                eprintln!(
-                                    "DupRead redirect top_level_word not parsed: {top_level_word:?}"
-                                );
+                                eprintln!("DupRead redirect cannot be parsed: {top_level_word:?}");
                                 None
                             }
                         }
@@ -710,19 +902,16 @@ impl<'a> InputInterpreter<'a> {
                     None
                 }
             }
-            #[cfg(not(target_os = "wasi"))]
             ast::Redirect::DupWrite(file_descriptor, top_level_word) => {
-                let fd_dest = file_descriptor.unwrap_or(STDOUT);
+                let fd_dst = file_descriptor.map_or_else(|| STDOUT, |fd| fd as Fd);
                 if let Some(fd) = self.handle_top_level_word(shell, top_level_word) {
                     match fd.as_str() {
-                        "-" => Some(Redirect::Close(fd_dest as RawFd)),
+                        "-" => Some(Redirect::Close(fd_dst as Fd)),
                         fd => {
-                            if let Ok(fd_source) = fd.parse::<u16>() {
-                                Some(Redirect::Duplicate((fd_dest as RawFd, fd_source as RawFd)))
+                            if let Ok(fd_src) = fd.parse::<Fd>() {
+                                Some(Redirect::Duplicate { fd_src, fd_dst })
                             } else {
-                                eprintln!(
-                                    "DupWrite redirect top_level_word not parsed: {top_level_word:?}"
-                                );
+                                eprintln!("DupWrite redirect cannot be parsed: {top_level_word:?}");
                                 None
                             }
                         }

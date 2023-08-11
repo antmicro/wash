@@ -5,18 +5,11 @@
  */
 
 use color_eyre::Report;
-#[cfg(not(target_os = "wasi"))]
-use command_fds::{CommandFdExt, FdMapping};
 use lazy_static::lazy_static;
 #[cfg(not(target_os = "wasi"))]
 use nix;
-#[cfg(not(target_os = "wasi"))]
-use os_pipe::{PipeReader, PipeWriter};
 use regex::Regex;
-use std::collections::HashMap;
-#[cfg(not(target_os = "wasi"))]
-use std::collections::HashSet;
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::env;
 use std::fs;
 use std::fs::{File, OpenOptions};
@@ -26,13 +19,10 @@ use std::io::{BufRead, BufReader, Read, Write};
 #[cfg(target_os = "wasi")]
 use std::mem;
 #[cfg(not(target_os = "wasi"))]
-use std::os::unix::io::AsRawFd;
-#[cfg(not(target_os = "wasi"))]
-use std::os::unix::prelude::{CommandExt, RawFd};
+use std::os::fd::IntoRawFd;
 #[cfg(target_os = "wasi")]
 use std::os::wasi::io::{AsRawFd, FromRawFd};
-use std::path::PathBuf;
-
+use std::path::{Path, PathBuf};
 #[cfg(target_os = "wasi")]
 use wasi;
 
@@ -40,8 +30,10 @@ use crate::internals::INTERNALS_MAP;
 use crate::interpreter::InputInterpreter;
 use crate::output_device::OutputDevice;
 
-type Fd = u16;
-type SerializedPath = String;
+#[cfg(target_os = "wasi")]
+pub type Fd = wasi::Fd;
+#[cfg(not(target_os = "wasi"))]
+pub type Fd = std::os::fd::RawFd;
 
 pub const EXIT_SUCCESS: i32 = 0;
 pub const EXIT_FAILURE: i32 = 1;
@@ -61,44 +53,185 @@ enum HistoryExpansion {
 }
 
 #[cfg(target_os = "wasi")]
-#[derive(Debug, Clone)]
+pub type Redirect = wasi_ext_lib::Redirect;
+
+#[cfg(not(target_os = "wasi"))]
+#[derive(Debug)]
 pub enum Redirect {
-    Read((Fd, SerializedPath)),
-    Write((Fd, SerializedPath)),
-    Append((Fd, SerializedPath)),
+    Read(Fd, String),
+    Write(Fd, String),
+    Append(Fd, String),
+    ReadWrite(Fd, String),
+    PipeIn(Fd),
+    PipeOut(Fd),
+    Duplicate { fd_src: Fd, fd_dst: Fd },
+    Close(Fd),
 }
 
-#[cfg(target_os = "wasi")]
-fn as_ext_redirect(r: &Redirect) -> wasi_ext_lib::Redirect {
-    match r {
-        Redirect::Read((fd, path)) => wasi_ext_lib::Redirect::Read((*fd as u32, path)),
-        Redirect::Write((fd, path)) => wasi_ext_lib::Redirect::Write((*fd as u32, path)),
-        Redirect::Append((fd, path)) => wasi_ext_lib::Redirect::Append((*fd as u32, path)),
+pub fn preprocess_redirects<'a>(
+    redirects: &'a [Redirect],
+    output_device: &mut OutputDevice<'a>,
+) -> Result<(), Report> {
+    enum DescriptorState<'a> {
+        Redirect(&'a Redirect),
+        Opened,
+        Closed,
     }
+
+    let mut red_map: HashMap<Fd, DescriptorState> = HashMap::new();
+
+    for redirect in redirects.iter() {
+        let affected_fd = match redirect {
+            Redirect::Read(fd, path) => {
+                // Check file exist
+                let file_path = Path::new(path);
+                if !file_path.exists() {
+                    return Err(Report::msg(format!("{}: No such file or directory", path)));
+                }
+                red_map.insert(*fd, DescriptorState::Redirect(redirect));
+                *fd
+            }
+            Redirect::Write(fd, path)
+            | Redirect::Append(fd, path)
+            | Redirect::ReadWrite(fd, path) => {
+                let file_path = Path::new(path);
+                if file_path.is_dir() {
+                    return Err(Report::msg(format!("{}: Is a directory", path)));
+                }
+                red_map.insert(*fd, DescriptorState::Redirect(redirect));
+                *fd
+            }
+            // In redirect array first should be pipes and then other redirects.
+            // We assume that pipes fds are opened by wash correctly.
+            Redirect::PipeIn(_) => {
+                red_map.insert(STDIN, DescriptorState::Redirect(redirect));
+                STDIN
+            }
+            Redirect::PipeOut(_) => {
+                red_map.insert(STDOUT, DescriptorState::Redirect(redirect));
+                STDOUT
+            }
+            Redirect::Duplicate { fd_src, fd_dst } => {
+                let redirect = match red_map.get(fd_src) {
+                    Some(DescriptorState::Redirect(redirected)) => *redirected,
+                    Some(DescriptorState::Opened) => redirect,
+                    Some(DescriptorState::Closed) => {
+                        return Err(Report::msg(format!("{}: Bad file descriptor", fd_src)));
+                    }
+                    None => {
+                        // check fd_src is opened
+                        let fd_res = {
+                            #[cfg(target_os = "wasi")]
+                            unsafe {
+                                wasi::fd_fdstat_get(*fd_src)
+                            }
+                            #[cfg(not(target_os = "wasi"))]
+                            nix::fcntl::fcntl(*fd_src, nix::fcntl::F_GETFD)
+                        };
+                        if fd_res.is_ok() {
+                            red_map.insert(*fd_src, DescriptorState::Opened);
+                            redirect
+                        } else {
+                            return Err(Report::msg(format!("{}: Bad file descriptor", fd_src)));
+                        }
+                    }
+                };
+                red_map.insert(*fd_dst, DescriptorState::Redirect(redirect));
+                *fd_dst
+            }
+            Redirect::Close(fd) => {
+                match red_map.get(fd) {
+                    Some(DescriptorState::Opened) | Some(DescriptorState::Redirect(_)) => {
+                        red_map.remove(fd);
+                    }
+                    Some(DescriptorState::Closed) => {
+                        return Err(Report::msg(format!("{}: Bad file descriptor", fd)));
+                    }
+                    None => {
+                        let fd_res = {
+                            #[cfg(target_os = "wasi")]
+                            unsafe {
+                                wasi::fd_fdstat_get(*fd)
+                            }
+                            #[cfg(not(target_os = "wasi"))]
+                            nix::fcntl::fcntl(*fd, nix::fcntl::F_GETFD)
+                        };
+                        if fd_res.is_err() {
+                            return Err(Report::msg(format!("{}: Bad file descriptor", fd)));
+                        }
+                    }
+                }
+
+                red_map.insert(*fd, DescriptorState::Closed);
+                *fd
+            }
+        };
+
+        if affected_fd == STDOUT {
+            output_device.set_redirect_out(redirect);
+        } else if affected_fd == STDERR {
+            output_device.set_redirect_err(redirect);
+        }
+    }
+
+    Ok(())
 }
 
 #[cfg(not(target_os = "wasi"))]
-#[derive(Debug)]
-pub enum Redirect {
-    Read((RawFd, SerializedPath)),
-    Write((RawFd, SerializedPath)),
-    Append((RawFd, SerializedPath)),
-    ReadWrite((RawFd, SerializedPath)),
-    PipeIn(Option<PipeReader>),
-    PipeOut(Option<PipeWriter>),
-    Duplicate((RawFd, RawFd)),
-    Close(RawFd),
-}
+pub fn apply_redirects(redirects: &[Redirect]) -> io::Result<()> {
+    for redirect in redirects.iter() {
+        let (fd_src, fd_dst): (Fd, Fd) = match redirect {
+            Redirect::Read(fd, path)
+            | Redirect::Write(fd, path)
+            | Redirect::Append(fd, path)
+            | Redirect::ReadWrite(fd, path) => {
+                let mut open_options = OpenOptions::new();
+                match redirect {
+                    Redirect::Read(_, _) => {
+                        open_options.read(true);
+                    }
+                    Redirect::Write(_, _) => {
+                        open_options.write(true).truncate(true).create(true);
+                    }
+                    Redirect::Append(_, _) => {
+                        open_options.write(true).append(true).create(true);
+                    }
+                    Redirect::ReadWrite(_, _) => {
+                        open_options.read(true).write(true).create(true);
+                    }
+                    _ => unreachable!(),
+                };
 
-#[cfg(not(target_os = "wasi"))]
-#[derive(Debug)]
-pub enum OpenedFd {
-    File { file: File, writable: bool },
-    PipeReader(PipeReader),
-    PipeWriter(PipeWriter),
-    StdIn,
-    StdOut,
-    StdErr,
+                // After this line, user is responsible for closing fd
+                let opened_fd = open_options.open(path)?.into_raw_fd();
+
+                (opened_fd, *fd)
+            }
+            Redirect::PipeIn(fd) => (*fd, STDIN),
+            Redirect::PipeOut(fd) => (*fd, STDOUT),
+            Redirect::Duplicate { fd_src, fd_dst } => (*fd_src, *fd_dst),
+            Redirect::Close(fd) => {
+                nix::unistd::close(*fd)?;
+                continue;
+            }
+        };
+
+        nix::unistd::dup2(fd_src, fd_dst)?;
+
+        // TODO: set cloexec instead of closing fds
+        if let Redirect::Duplicate {
+            fd_src: _,
+            fd_dst: _,
+        } = redirect
+        {
+            // Do not close fd_src
+            continue;
+        }
+
+        nix::unistd::close(fd_src)?;
+    }
+
+    Ok(())
 }
 
 pub fn spawn(
@@ -110,65 +243,80 @@ pub fn spawn(
 ) -> Result<(i32, i32), i32> {
     #[cfg(target_os = "wasi")]
     {
-        wasi_ext_lib::spawn(
-            path,
-            args,
-            env,
-            background,
-            redirects.iter().map(as_ext_redirect).collect(),
-        )
+        wasi_ext_lib::spawn(path, args, env, background, redirects)
     }
     #[cfg(not(target_os = "wasi"))]
-    return Ok({
-        let mut std_fds = HashSet::from([STDIN as RawFd, STDOUT as RawFd, STDERR as RawFd]);
-        let mut child = std::process::Command::new(path);
-        child.args(args).envs(env);
-
-        let fd_mappings = redirects
-            .iter()
-            .map(|red| {
-                if let Redirect::Duplicate((child_fd, parent_fd)) = *red {
-                    std_fds.remove(&child_fd);
-                    FdMapping {
-                        parent_fd,
-                        child_fd,
-                    }
-                } else {
-                    panic!("Not allowed redirection subtype in syscall: {:?}", red);
-                }
-            })
-            .collect::<Vec<FdMapping>>();
-
-        let fds_to_close = std_fds.into_iter().collect::<Vec<RawFd>>();
-
-        child
-            .fd_mappings(fd_mappings)
-            .expect("Could not apply file descriptor mapping.");
-
-        /*
-        pre_exec is unsafe function, if user wants to close stdin/out/err
-        descritors we must do it between fork and execv syscalls. For
-        higher fd numbers we preprocess redirections and do not open fds
-        that would be finally closed
-        */
-        unsafe {
-            child.pre_exec(move || {
-                for fd in fds_to_close.iter() {
-                    nix::unistd::close(*fd).expect("Cannot close fd before exec!");
-                }
-                Ok(())
-            });
+    match unsafe { nix::unistd::fork() } {
+        Ok(nix::unistd::ForkResult::Parent { child }) => {
+            if !background {
+                Ok((wait_for_child(child), i32::from(child)))
+            } else {
+                Ok((EXIT_SUCCESS, i32::from(child)))
+            }
         }
+        Ok(nix::unistd::ForkResult::Child) => {
+            use std::ffi::CString;
 
-        let mut spawned = child.spawn().unwrap();
-        let child_pid = spawned.id();
+            fn env_fmt<T: std::fmt::Display>((key, val): (T, T)) -> CString {
+                CString::new(format!("{}={}", key, val)).unwrap()
+            }
 
-        if !background {
-            (spawned.wait().unwrap().code().unwrap(), child_pid as i32)
-        } else {
-            (EXIT_SUCCESS, child_pid as i32)
+            // Apply all redirects
+            if let Err(err) = apply_redirects(redirects) {
+                eprintln!("{}: {}", env!("CARGO_PKG_NAME"), err);
+                std::process::exit(EXIT_FAILURE);
+            }
+
+            let prog_name = if let Some(idx) = path.rfind('/') {
+                &path[(idx + 1)..]
+            } else {
+                path
+            };
+
+            let cpath = CString::new(path).unwrap();
+            let cargs: Vec<CString> = [prog_name]
+                .iter()
+                .chain(args.iter())
+                .map(|arg: &&str| CString::new(*arg).unwrap())
+                .collect();
+
+            let cenv: Vec<CString> = std::env::vars()
+                .map(env_fmt)
+                .chain(env.iter().map(env_fmt))
+                .collect();
+
+            if let Err(err) =
+                nix::unistd::execve(cpath.as_c_str(), cargs.as_slice(), cenv.as_slice())
+            {
+                eprintln!("{}: {}", env!("CARGO_PKG_NAME"), err);
+                std::process::exit(EXIT_FAILURE);
+            }
+            unreachable!()
         }
-    });
+        Err(err) => {
+            eprintln!("{}: {}", env!("CARGO_PKG_NAME"), err);
+            Err(EXIT_FAILURE)
+        }
+    }
+}
+
+#[cfg(not(target_os = "wasi"))]
+pub fn wait_for_child(child_pid: nix::unistd::Pid) -> i32 {
+    loop {
+        let wait_status = nix::sys::wait::waitpid(child_pid, None)
+            .unwrap_or_else(|err| panic!("{}: waitpid error: {}", env!("CARGO_PKG_NAME"), err));
+        match wait_status {
+            nix::sys::wait::WaitStatus::Exited(waited_pid, exit_code)
+                if waited_pid == child_pid =>
+            {
+                return exit_code;
+            }
+            nix::sys::wait::WaitStatus::Exited(_, _) => {
+                continue;
+            }
+            _ => unreachable!(),
+        }
+    }
 }
 
 pub fn path_exists(path: &str) -> io::Result<bool> {
@@ -179,159 +327,6 @@ pub fn path_exists(path: &str) -> io::Result<bool> {
             Err(error)
         }
     })
-}
-
-#[cfg(not(target_os = "wasi"))]
-pub fn preprocess_redirects(
-    redirects: &mut [Redirect],
-) -> (HashMap<RawFd, OpenedFd>, io::Result<()>) {
-    let mut fd_redirects = HashMap::from([
-        (STDIN as RawFd, OpenedFd::StdIn),
-        (STDOUT as RawFd, OpenedFd::StdOut),
-        (STDERR as RawFd, OpenedFd::StdErr),
-    ]);
-
-    // In bash pipeline redirections are done before rest of them
-    for redirect in redirects.iter_mut() {
-        match redirect {
-            Redirect::PipeIn(pipe) => {
-                let pipe = pipe.take().expect("Empty pipeline redirection");
-                fd_redirects.insert(STDIN as RawFd, OpenedFd::PipeReader(pipe));
-            }
-            Redirect::PipeOut(pipe) => {
-                let pipe = pipe.take().expect("Empty pipeline redirection");
-                fd_redirects.insert(STDOUT as RawFd, OpenedFd::PipeWriter(pipe));
-            }
-            _ => {}
-        }
-    }
-
-    for redirect in redirects.iter_mut() {
-        match redirect {
-            Redirect::Read((fd, path)) => {
-                let file = OpenOptions::new().read(true).open(path);
-                if let Ok(file) = file {
-                    let fd = *fd;
-                    fd_redirects.insert(
-                        fd,
-                        OpenedFd::File {
-                            file,
-                            writable: false,
-                        },
-                    );
-                } else if let Err(e) = file {
-                    return (fd_redirects, Err(e));
-                }
-            }
-            Redirect::Write((fd, path)) => {
-                let file = OpenOptions::new()
-                    .write(true)
-                    .truncate(true)
-                    .create(true)
-                    .open(path);
-                if let Ok(file) = file {
-                    let fd = *fd;
-                    fd_redirects.insert(
-                        fd,
-                        OpenedFd::File {
-                            file,
-                            writable: true,
-                        },
-                    );
-                } else if let Err(e) = file {
-                    return (fd_redirects, Err(e));
-                }
-            }
-            Redirect::Append((fd, path)) => {
-                let file = OpenOptions::new()
-                    .write(true)
-                    .append(true)
-                    .create(true)
-                    .open(path);
-                if let Ok(file) = file {
-                    let fd = *fd;
-                    fd_redirects.insert(
-                        fd,
-                        OpenedFd::File {
-                            file,
-                            writable: true,
-                        },
-                    );
-                } else if let Err(e) = file {
-                    return (fd_redirects, Err(e));
-                }
-            }
-            Redirect::ReadWrite((fd, path)) => {
-                let file = OpenOptions::new()
-                    .read(true)
-                    .write(true)
-                    .create(true)
-                    .open(path);
-                if let Ok(file) = file {
-                    let fd = *fd;
-                    fd_redirects.insert(
-                        fd,
-                        OpenedFd::File {
-                            file,
-                            writable: true,
-                        },
-                    );
-                } else if let Err(e) = file {
-                    return (fd_redirects, Err(e));
-                }
-            }
-            Redirect::Duplicate((fd_dest, fd_source)) => {
-                if let Some(dest) = fd_redirects.get(&(*fd_source)) {
-                    match dest {
-                        OpenedFd::File { file, writable } => {
-                            let file = match file.try_clone() {
-                                Ok(file) => file,
-                                Err(e) => return (fd_redirects, Err(e)),
-                            };
-                            let writable = *writable;
-                            fd_redirects.insert(*fd_dest, OpenedFd::File { file, writable });
-                        }
-                        OpenedFd::PipeReader(pipe) => {
-                            let pipe = match pipe.try_clone() {
-                                Ok(pipe) => pipe,
-                                Err(e) => return (fd_redirects, Err(e)),
-                            };
-                            fd_redirects.insert(*fd_dest, OpenedFd::PipeReader(pipe));
-                        }
-                        OpenedFd::PipeWriter(pipe) => {
-                            let pipe = match pipe.try_clone() {
-                                Ok(pipe) => pipe,
-                                Err(e) => return (fd_redirects, Err(e)),
-                            };
-                            fd_redirects.insert(*fd_dest, OpenedFd::PipeWriter(pipe));
-                        }
-                        OpenedFd::StdIn => {
-                            fd_redirects.insert(*fd_dest, OpenedFd::StdIn);
-                        }
-                        OpenedFd::StdOut => {
-                            fd_redirects.insert(*fd_dest, OpenedFd::StdOut);
-                        }
-                        OpenedFd::StdErr => {
-                            fd_redirects.insert(*fd_dest, OpenedFd::StdErr);
-                        }
-                    }
-                } else {
-                    return (
-                        fd_redirects,
-                        Err(io::Error::from_raw_os_error(
-                            nix::errno::Errno::EBADF as i32,
-                        )),
-                    );
-                }
-            }
-            Redirect::Close(fd) => {
-                fd_redirects.remove(&*fd);
-            }
-            Redirect::PipeIn(_) | Redirect::PipeOut(_) => continue,
-        }
-    }
-
-    (fd_redirects, Ok(()))
 }
 
 #[cfg(target_os = "wasi")]
@@ -587,8 +582,6 @@ impl Shell {
         let mut escaped = false;
         let mut history_entry_to_display: i32 = -1;
         if self.insert_mode {
-            #[cfg(target_os = "wasi")]
-            let _ = wasi_ext_lib::hterm("cursor-shape", Some("BLOCK"));
             self.insert_mode = false;
         }
 
@@ -646,9 +639,6 @@ impl Shell {
                                     // Insert
                                     [0x32, 0x7e] => {
                                         self.insert_mode = !self.insert_mode;
-                                        #[cfg(target_os = "wasi")]
-                                        let _ =
-                                            wasi_ext_lib::hterm("cursor-shape", Some("UNDERLINE"));
                                         escaped = false;
                                     }
                                     // delete key
@@ -1015,61 +1005,14 @@ impl Shell {
         args: &mut Vec<String>,
         env: &HashMap<String, String>,
         background: bool,
-        redirects: &mut [Redirect],
+        redirects: &[Redirect],
     ) -> Result<i32, Report> {
-        #[cfg(target_os = "wasi")]
-        let mut output_device = match OutputDevice::new(redirects) {
-            Ok(o) => o,
-            Err(s) => {
-                eprintln!("{}: {}", env!("CARGO_PKG_NAME"), s);
-                return Ok(EXIT_FAILURE);
-            }
-        };
-
-        #[cfg(not(target_os = "wasi"))]
-        /*
-        We need to keep opened file descriptors before spawning child,
-        droping opened_fds struture leads to releasing File/Pipe structures
-        and closing associated file descriptors
-        */
-        let (redirects, _opened_fds, mut output_device) = {
-            let (opened_fds, status) = preprocess_redirects(redirects);
-            let od_result = OutputDevice::new(&opened_fds);
-            let mut output_device = match od_result {
-                Ok(o) => o,
-                Err(s) => {
-                    eprintln!("{}: {}", env!("CARGO_PKG_NAME"), s);
-                    return Ok(EXIT_FAILURE);
-                }
-            };
-            if let Err(e) = status {
-                output_device.eprintln(&format!("{}: {}", env!("CARGO_PKG_NAME"), e));
-                output_device.flush()?;
-                return Ok(EXIT_FAILURE);
-            }
-
-            let redirects = opened_fds
-                .iter()
-                .map(|(fd_child, target)| match target {
-                    OpenedFd::File { file, writable: _ } => {
-                        Redirect::Duplicate((*fd_child, file.as_raw_fd()))
-                    }
-                    OpenedFd::PipeReader(pipe) => {
-                        Redirect::Duplicate((*fd_child, pipe.as_raw_fd()))
-                    }
-                    OpenedFd::PipeWriter(pipe) => {
-                        Redirect::Duplicate((*fd_child, pipe.as_raw_fd()))
-                    }
-                    OpenedFd::StdIn => Redirect::Duplicate((*fd_child, STDIN as RawFd)),
-                    OpenedFd::StdOut => Redirect::Duplicate((*fd_child, STDOUT as RawFd)),
-                    OpenedFd::StdErr => Redirect::Duplicate((*fd_child, STDERR as RawFd)),
-                })
-                .collect::<Vec<Redirect>>();
-
-            (redirects, opened_fds, output_device)
-        };
-        #[cfg(not(target_os = "wasi"))]
-        let redirects = &redirects;
+        let mut output_device = OutputDevice::new();
+        if let Err(err) = preprocess_redirects(redirects, &mut output_device) {
+            output_device.eprintln(format!("{}: {}", env!("CARGO_PKG_NAME"), err).as_str());
+            output_device.flush()?;
+            return Ok(EXIT_FAILURE);
+        }
 
         let result: Result<i32, Report> = if let Some(internal) = INTERNALS_MAP.get(command) {
             internal(self, args, &mut output_device)
