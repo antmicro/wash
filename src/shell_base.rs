@@ -409,10 +409,19 @@ impl Default for InternalEventSource {
 
         let event_source_fd = match wasi_ext_lib::event_source_fd(wasi_ext_lib::WASI_EVENT_SIGINT) {
             Ok(fd) => fd,
-            Err(e) => {
-                panic!("Cannot obtain evnt_source_fd, error code = {}", e);
+            Err(err) => {
+                panic!("Cannot obtain event_source_fd, error code: {}", err);
             }
         };
+
+        if let Err(err) = wasi_ext_lib::fcntl(
+            event_source_fd as Fd,
+            wasi_ext_lib::FcntlCommand::F_SETFD {
+                flags: wasi_ext_lib::WASI_EXT_FDFLAG_CLOEXEC
+            }
+        ) {
+            panic!("Cannot set cloexec flag for event_source_fd, error code: {}", err);
+        }
 
         InternalEventSource {
             subs: [

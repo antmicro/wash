@@ -14,6 +14,8 @@ use std::os::fd::IntoRawFd;
 use std::path::Path;
 use std::path::PathBuf;
 
+use color_eyre::Report;
+
 use conch_parser::ast::{self, ComplexWord::Single, SimpleWord::Param, TopLevelWord, Word::Simple};
 use conch_parser::lexer::Lexer;
 use conch_parser::parse::{DefaultParser, ParseError};
@@ -34,8 +36,57 @@ use crate::output_device::OutputDevice;
 use crate::shell_base::{apply_redirects, wait_for_child};
 
 enum SavedFd {
-    Move { fd_src: Fd, fd_dst: Fd },
+    Move {
+        fd_src: Fd,
+        fd_dst: Fd,
+        #[cfg(target_os = "wasi")]
+        fd_flags: wasi::Fdflags,
+        #[cfg(not(target_os = "wasi"))]
+        fd_flags: nix::fcntl::FdFlag,
+    },
     Close { fd: Fd },
+}
+
+impl SavedFd {
+    #[cfg(target_os = "wasi")]
+    fn save_fd(fd: Fd) -> Result<Self, Report> {
+        let saved_fd = match wasi_ext_lib::fcntl(
+            fd,
+            wasi_ext_lib::FcntlCommand::F_MVFD { min_fd_num: 10 },
+        ) {
+            Ok(saved_fd) => saved_fd as wasi::Fd,
+            Err(err) => return Err(Report::msg(format!(
+                "fcntl: cannot move fd {}, errno: {}", fd, err,
+            ))),
+        };
+
+        let flags = match wasi_ext_lib::fcntl(
+            saved_fd,
+            wasi_ext_lib::FcntlCommand::F_GETFD
+        ) {
+            Ok(flags) => flags as wasi::Fdflags,
+            Err(err) => return Err(Report::msg(format!(
+                "fcntl: cannot get flags of fd {}, errno: {}", fd, err,
+            ))),
+        };
+
+        if let Err(err) = wasi_ext_lib::fcntl(
+            saved_fd,
+            wasi_ext_lib::FcntlCommand::F_SETFD { flags }
+        ) {
+            return Err(Report::msg(format!(
+                "fcntl: cannot set flags of fd {}, errno: {}", fd, err,
+            )));
+        }
+
+        Ok(SavedFd::Move {
+            fd_src: saved_fd,
+            fd_dst: fd,
+            fd_flags: flags,
+        })
+    }
+
+
 }
 
 pub struct InputInterpreter<'a> {
@@ -318,6 +369,44 @@ impl<'a> InputInterpreter<'a> {
         background: bool,
         redirects: &mut Vec<Redirect>,
     ) -> i32 {
+
+        fn restore_fds(fds: Vec<SavedFd>) {
+            for saved_fd in fds.into_iter().rev() {
+                match saved_fd {
+                    SavedFd::Move { fd_src, fd_dst, fd_flags } => {
+                        #[cfg(target_os = "wasi")]
+                        if let Err(err) = unsafe { wasi::fd_renumber(fd_src, fd_dst) } {
+                            panic!("{}: fd_renumber: {}", env!("CARGO_PKG_NAME"), err);
+                        } else if let Err(err) = unsafe { wasi::fd_close(fd_src) } {
+                            panic!("{}: fd_close: {}", env!("CARGO_PKG_NAME"), err);
+                        } else if let Err(err) = wasi_ext_lib::fcntl(
+                            fd_dst,
+                            wasi_ext_lib::FcntlCommand::F_SETFD { flags: fd_flags }
+                        ) {
+                            panic!("{}: fcntl: {}", env!("CARGO_PKG_NAME"), err);
+                        }
+
+                        #[cfg(not(target_os = "wasi"))]
+                        if let Err(err) = nix::unistd::dup2(fd_src, fd_dst) {
+                            panic!("{}: dup2: {}", env!("CARGO_PKG_NAME"), err);
+                        } else if let Err(err) = nix::unistd::close(fd_src) {
+                            panic!("{}: close: {}", env!("CARGO_PKG_NAME"), err);
+                        } //TODO restore flags for native
+                    }
+                    SavedFd::Close { fd } => {
+                        #[cfg(target_os = "wasi")]
+                        if let Err(err) = unsafe { wasi::fd_close(fd as Fd) } {
+                            panic!("{}: fd_close: {}", env!("CARGO_PKG_NAME"), err);
+                        }
+                        #[cfg(not(target_os = "wasi"))]
+                        if let Err(err) = nix::unistd::close(fd) {
+                            panic!("{}: close: {}", env!("CARGO_PKG_NAME"), err);
+                        }
+                    }
+                }
+            }
+        }
+
         let ast::CompoundCommand { kind, io } = cmd;
 
         for redirect_type in io.iter() {
@@ -409,6 +498,8 @@ impl<'a> InputInterpreter<'a> {
             }
         }
 
+        let mut exit_status = EXIT_SUCCESS;
+
         // fds_to_restore[i] = (src_fd, dst_fd); src_fd shoulde be greater than 9
         let mut fds_to_restore: Vec<SavedFd> = Vec::new();
 
@@ -447,7 +538,8 @@ impl<'a> InputInterpreter<'a> {
                             if let Err(err) = output_device.flush() {
                                 eprintln!("Cannot flush output_device: {}", err)
                             }
-                            return EXIT_FAILURE;
+                            exit_status = EXIT_FAILURE;
+                            break;
                         }
                     };
 
@@ -458,25 +550,17 @@ impl<'a> InputInterpreter<'a> {
                 Redirect::Duplicate { fd_src, fd_dst } => (*fd_src, *fd_dst),
                 Redirect::Close(fd) => {
                     #[cfg(target_os = "wasi")]
-                    let move_res = wasi_ext_lib::fcntl(
-                        *fd,
-                        wasi_ext_lib::FcntlCommand::F_MVFD { min_fd_num: 10 },
-                    );
-
-                    #[cfg(not(target_os = "wasi"))]
-                    let move_res = nix::fcntl::fcntl(*fd, nix::fcntl::F_DUPFD(10));
-
-                    match move_res {
-                        Ok(saved_fd) => {
-                            fds_to_restore.push(SavedFd::Move {
-                                fd_src: saved_fd as Fd,
-                                fd_dst: *fd,
-                            });
-                            #[cfg(not(target_os = "wasi"))]
-                            nix::unistd::close(*fd).expect("Cannot close duplicated fd");
-                        }
+                    match SavedFd::save_fd(*fd) {
+                        Ok(saved_fd) => fds_to_restore.push(saved_fd),
                         Err(err) => {
-                            panic!("{}: fcntl: {}", env!("CARGO_PKG_NAME"), err)
+                            output_device.eprintln(
+                                format!(
+                                    "{}: cannot store fd, errno: {}", env!("CARGO_PKG_NAME"), err
+                                ).as_str()
+                            );
+                            exit_status = EXIT_FAILURE;
+
+                            break;
                         }
                     }
 
@@ -485,32 +569,25 @@ impl<'a> InputInterpreter<'a> {
             };
 
             #[cfg(target_os = "wasi")]
-            let stat_res = unsafe { wasi::fd_fdstat_get(fd_dst as Fd) };
+            let fd_flags_res = wasi_ext_lib::fcntl(
+                fd_dst,
+                wasi_ext_lib::FcntlCommand::F_GETFD
+            );
 
             #[cfg(not(target_os = "wasi"))]
-            let stat_res = nix::fcntl::fcntl(fd_dst, nix::fcntl::F_GETFD);
+            let fd_flags_res = nix::fcntl::fcntl(fd_dst, nix::fcntl::F_GETFD);
 
-            match stat_res {
+            match fd_flags_res {
                 Ok(_) if fd_dst != fd_src => {
                     // Make copy of fd
-                    #[cfg(target_os = "wasi")]
-                    let move_res = wasi_ext_lib::fcntl(
-                        fd_dst,
-                        wasi_ext_lib::FcntlCommand::F_MVFD { min_fd_num: 10 },
-                    );
-
-                    #[cfg(not(target_os = "wasi"))]
-                    let move_res = nix::fcntl::fcntl(fd_dst, nix::fcntl::F_DUPFD(10));
-
-                    match move_res {
-                        Ok(saved_fd) => {
-                            fds_to_restore.push(SavedFd::Move {
-                                fd_src: saved_fd as Fd,
-                                fd_dst,
-                            });
-                        }
+                    match SavedFd::save_fd(fd_dst) {
+                        Ok(saved_fd) => fds_to_restore.push(saved_fd),
                         Err(err) => {
-                            panic!("{}: fcntl: {}", env!("CARGO_PKG_NAME"), err)
+                            output_device.eprintln(
+                                format!("{}: {}", env!("CARGO_PKG_NAME"), err).as_str()
+                            );
+
+                            break;
                         }
                     }
                 }
@@ -520,7 +597,7 @@ impl<'a> InputInterpreter<'a> {
                     continue;
                 }
                 #[cfg(target_os = "wasi")]
-                Err(wasi::ERRNO_BADF) => {
+                Err(err) if err == wasi::ERRNO_BADF.raw().into() => {
                     // We can make redirect without saving fd
                     fds_to_restore.push(SavedFd::Close { fd: fd_dst });
                 }
@@ -530,13 +607,24 @@ impl<'a> InputInterpreter<'a> {
                     fds_to_restore.push(SavedFd::Close { fd: fd_dst });
                 }
                 Err(err) => {
-                    panic!("{}: fd_fdstat_get: {}", env!("CARGO_PKG_NAME"), err)
+                    output_device.eprintln(
+                        format!("{}: fcntl: {}", env!("CARGO_PKG_NAME"), err).as_str()
+                    );
+                    exit_status = EXIT_FAILURE;
+
+                    break;
                 }
             }
 
             #[cfg(target_os = "wasi")]
             if let Err(err) = unsafe { wasi::fd_renumber(fd_src, fd_dst) } {
-                panic!("{}: fd_renumber: {}", env!("CARGO_PKG_NAME"), err);
+                // panic!("{}: fd_renumber: {}", env!("CARGO_PKG_NAME"), err);
+                output_device.eprintln(
+                    format!("{}: fd_renumber: {}", env!("CARGO_PKG_NAME"), err).as_str()
+                );
+                exit_status = EXIT_FAILURE;
+
+                break;
             }
 
             #[cfg(not(target_os = "wasi"))]
@@ -545,7 +633,13 @@ impl<'a> InputInterpreter<'a> {
             }
         }
 
-        let exit_status = match kind {
+        if exit_status != EXIT_SUCCESS {
+            output_device.flush();
+            restore_fds(fds_to_restore);
+            return exit_status;
+        }
+
+        exit_status = match kind {
             ast::CompoundCommandKind::Subshell {
                 body: _,
                 start_pos: _,
@@ -694,37 +788,9 @@ impl<'a> InputInterpreter<'a> {
             }
         };
 
+        output_device.flush();
         // restore saved fds in reversed order
-        for saved_fd in fds_to_restore.into_iter().rev() {
-            match saved_fd {
-                SavedFd::Move { fd_src, fd_dst } => {
-                    #[cfg(target_os = "wasi")]
-                    if let Err(err) = unsafe { wasi::fd_renumber(fd_src, fd_dst) } {
-                        panic!("{}: fd_renumber: {}", env!("CARGO_PKG_NAME"), err);
-                    } else if let Err(err) = unsafe { wasi::fd_close(fd_src) } {
-                        panic!("{}: fd_close: {}", env!("CARGO_PKG_NAME"), err);
-                    }
-
-                    #[cfg(not(target_os = "wasi"))]
-                    if let Err(err) = nix::unistd::dup2(fd_src, fd_dst) {
-                        panic!("{}: dup2: {}", env!("CARGO_PKG_NAME"), err);
-                    } else if let Err(err) = nix::unistd::close(fd_src) {
-                        panic!("{}: close: {}", env!("CARGO_PKG_NAME"), err);
-                    }
-                }
-                SavedFd::Close { fd } => {
-                    #[cfg(target_os = "wasi")]
-                    if let Err(err) = unsafe { wasi::fd_close(fd as Fd) } {
-                        panic!("{}: fd_close: {}", env!("CARGO_PKG_NAME"), err);
-                    }
-                    #[cfg(not(target_os = "wasi"))]
-                    if let Err(err) = nix::unistd::close(fd) {
-                        panic!("{}: close: {}", env!("CARGO_PKG_NAME"), err);
-                    }
-                }
-            }
-        }
-
+        restore_fds(fds_to_restore);
         exit_status
     }
 
