@@ -72,7 +72,9 @@ impl SavedFd {
 
         if let Err(err) = wasi_ext_lib::fcntl(
             saved_fd,
-            wasi_ext_lib::FcntlCommand::F_SETFD { flags }
+            wasi_ext_lib::FcntlCommand::F_SETFD {
+                flags: wasi_ext_lib::WASI_EXT_FDFLAG_CLOEXEC
+            }
         ) {
             return Err(Report::msg(format!(
                 "fcntl: cannot set flags of fd {}, errno: {}", fd, err,

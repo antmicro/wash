@@ -1070,7 +1070,13 @@ impl Shell {
             match full_path {
                 Ok(path) => {
                     let file = File::open(&path).unwrap();
-                    if let Some(Ok(line)) = BufReader::new(file).lines().next() {
+
+                    let mut lines = BufReader::new(file).lines();
+                    let reader_result = lines.next();
+                    // close opened file to prevent fd leak
+                    drop(lines);
+
+                    if let Some(Ok(line)) = reader_result {
                         // file starts with valid UTF-8, most likely a script
                         let binary_path = if let Some(path) = line.strip_prefix("#!") {
                             path.trim().to_string()
