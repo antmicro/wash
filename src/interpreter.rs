@@ -86,7 +86,45 @@ impl SavedFd {
         })
     }
 
+    #[cfg(not(target_os = "wasi"))]
+    fn save_fd(fd: Fd) -> Result<Self, Report> {
+        let saved_fd = match nix::fcntl::fcntl(
+            fd,
+            nix::fcntl::F_DUPFD(10)
+        ) {
+            Ok(saved_fd) => saved_fd as Fd,
+            Err(err) => return Err(Report::msg(format!(
+                "fcntl: cannot duplicate fd {}, errno: {}", fd, err,
+            ))),
+        };
 
+        let flags = match nix::fcntl::fcntl(
+            saved_fd,
+            nix::fcntl::F_GETFD
+        ) {
+            Ok(flags) => nix::fcntl::FdFlag::from_bits(flags).unwrap(),
+            Err(err) => return Err(Report::msg(format!(
+                "fcntl: cannot get flags of fd {}, errno: {}", fd, err,
+            ))),
+        };
+
+        if let Err(err) = nix::fcntl::fcntl(
+            saved_fd,
+            nix::fcntl::F_SETFD(
+                nix::fcntl::FdFlag::FD_CLOEXEC
+            )
+        ) {
+            return Err(Report::msg(format!(
+                "fcntl: cannot set flags of fd {}, errno: {}", fd, err,
+            )));
+        }
+
+        Ok(SavedFd::Move {
+            fd_src: saved_fd,
+            fd_dst: fd,
+            fd_flags: flags,
+        })
+    }
 }
 
 pub struct InputInterpreter<'a> {
@@ -391,7 +429,12 @@ impl<'a> InputInterpreter<'a> {
                             panic!("{}: dup2: {}", env!("CARGO_PKG_NAME"), err);
                         } else if let Err(err) = nix::unistd::close(fd_src) {
                             panic!("{}: close: {}", env!("CARGO_PKG_NAME"), err);
-                        } //TODO restore flags for native
+                        } else if let Err(err) = nix::fcntl::fcntl(
+                            fd_dst,
+                            nix::fcntl::F_SETFD(fd_flags)
+                        ) {
+                            panic!("{}: fcntl: {}", env!("CARGO_PKG_NAME"), err);
+                        }
                     }
                     SavedFd::Close { fd } => {
                         #[cfg(target_os = "wasi")]
@@ -544,7 +587,6 @@ impl<'a> InputInterpreter<'a> {
                 Redirect::PipeOut(fd) => (*fd, STDOUT, false),
                 Redirect::Duplicate { fd_src, fd_dst } => (*fd_src, *fd_dst, false),
                 Redirect::Close(fd) => {
-                    #[cfg(target_os = "wasi")]
                     match SavedFd::save_fd(*fd) {
                         Ok(saved_fd) => fds_to_restore.push(saved_fd),
                         Err(err) => {
@@ -626,7 +668,19 @@ impl<'a> InputInterpreter<'a> {
 
             #[cfg(not(target_os = "wasi"))]
             if let Err(err) = nix::unistd::dup2(fd_src, fd_dst) {
-                panic!("{}: dup2: {}", env!("CARGO_PKG_NAME"), err);
+                eprintln!(
+                    "{}: dup2: {}", env!("CARGO_PKG_NAME"), err
+                );
+                exit_status = EXIT_FAILURE;
+                break;
+            } else if close_src {
+                if let Err(err) = nix::unistd::close(fd_src) {
+                    eprintln!(
+                        "{}: close: {}", env!("CARGO_PKG_NAME"), err
+                    );
+                    exit_status = EXIT_FAILURE;
+                    break;
+                }
             }
         }
 
