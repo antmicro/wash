@@ -504,7 +504,7 @@ impl<'a> InputInterpreter<'a> {
         let mut fds_to_restore: Vec<SavedFd> = Vec::new();
 
         for redirect in redirects.iter() {
-            let (fd_src, fd_dst): (Fd, Fd) = match redirect {
+            let (fd_src, fd_dst, close_src): (Fd, Fd, bool) = match redirect {
                 Redirect::Read(fd, path)
                 | Redirect::Write(fd, path)
                 | Redirect::Append(fd, path)
@@ -532,31 +532,24 @@ impl<'a> InputInterpreter<'a> {
                             file.into_raw_fd() as Fd
                         }
                         Err(err) => {
-                            output_device.eprintln(
-                                format!("{}: {}: {}", env!("CARGO_PKG_NAME"), path, err).as_str(),
-                            );
-                            if let Err(err) = output_device.flush() {
-                                eprintln!("Cannot flush output_device: {}", err)
-                            }
+                            eprintln!("{}: {}: {}", env!("CARGO_PKG_NAME"), path, err);
                             exit_status = EXIT_FAILURE;
                             break;
                         }
                     };
 
-                    (opened_fd, *fd)
+                    (opened_fd, *fd, true)
                 }
-                Redirect::PipeIn(fd) => (*fd, STDIN),
-                Redirect::PipeOut(fd) => (*fd, STDOUT),
-                Redirect::Duplicate { fd_src, fd_dst } => (*fd_src, *fd_dst),
+                Redirect::PipeIn(fd) => (*fd, STDIN, false),
+                Redirect::PipeOut(fd) => (*fd, STDOUT, false),
+                Redirect::Duplicate { fd_src, fd_dst } => (*fd_src, *fd_dst, false),
                 Redirect::Close(fd) => {
                     #[cfg(target_os = "wasi")]
                     match SavedFd::save_fd(*fd) {
                         Ok(saved_fd) => fds_to_restore.push(saved_fd),
                         Err(err) => {
-                            output_device.eprintln(
-                                format!(
-                                    "{}: cannot store fd, errno: {}", env!("CARGO_PKG_NAME"), err
-                                ).as_str()
+                            eprintln!(
+                                "{}: cannot store fd, errno: {}", env!("CARGO_PKG_NAME"), err
                             );
                             exit_status = EXIT_FAILURE;
 
@@ -583,10 +576,10 @@ impl<'a> InputInterpreter<'a> {
                     match SavedFd::save_fd(fd_dst) {
                         Ok(saved_fd) => fds_to_restore.push(saved_fd),
                         Err(err) => {
-                            output_device.eprintln(
-                                format!("{}: {}", env!("CARGO_PKG_NAME"), err).as_str()
+                            eprintln!(
+                                "{}: {}", env!("CARGO_PKG_NAME"), err
                             );
-
+                            exit_status = EXIT_FAILURE;
                             break;
                         }
                     }
@@ -607,9 +600,7 @@ impl<'a> InputInterpreter<'a> {
                     fds_to_restore.push(SavedFd::Close { fd: fd_dst });
                 }
                 Err(err) => {
-                    output_device.eprintln(
-                        format!("{}: fcntl: {}", env!("CARGO_PKG_NAME"), err).as_str()
-                    );
+                    eprintln!("{}: fcntl: cannot get flags of fd {}, errno: {}", env!("CARGO_PKG_NAME"), fd_dst, err);
                     exit_status = EXIT_FAILURE;
 
                     break;
@@ -618,13 +609,19 @@ impl<'a> InputInterpreter<'a> {
 
             #[cfg(target_os = "wasi")]
             if let Err(err) = unsafe { wasi::fd_renumber(fd_src, fd_dst) } {
-                // panic!("{}: fd_renumber: {}", env!("CARGO_PKG_NAME"), err);
-                output_device.eprintln(
-                    format!("{}: fd_renumber: {}", env!("CARGO_PKG_NAME"), err).as_str()
+                eprintln!(
+                    "{}: fd_renumber: {}", env!("CARGO_PKG_NAME"), err
                 );
                 exit_status = EXIT_FAILURE;
-
                 break;
+            } else if close_src {
+                if let Err(err) = unsafe { wasi::fd_close(fd_src) } {
+                    eprintln!(
+                        "{}: fd_close: {}", env!("CARGO_PKG_NAME"), err
+                    );
+                    exit_status = EXIT_FAILURE;
+                    break;
+                }
             }
 
             #[cfg(not(target_os = "wasi"))]
@@ -634,7 +631,6 @@ impl<'a> InputInterpreter<'a> {
         }
 
         if exit_status != EXIT_SUCCESS {
-            output_device.flush();
             restore_fds(fds_to_restore);
             return exit_status;
         }
@@ -788,8 +784,6 @@ impl<'a> InputInterpreter<'a> {
             }
         };
 
-        output_device.flush();
-        // restore saved fds in reversed order
         restore_fds(fds_to_restore);
         exit_status
     }
