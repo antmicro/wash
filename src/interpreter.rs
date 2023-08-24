@@ -44,40 +44,44 @@ enum SavedFd {
         #[cfg(not(target_os = "wasi"))]
         fd_flags: nix::fcntl::FdFlag,
     },
-    Close { fd: Fd },
+    Close {
+        fd: Fd,
+    },
 }
 
 impl SavedFd {
     #[cfg(target_os = "wasi")]
     fn save_fd(fd: Fd) -> Result<Self, Report> {
-        let saved_fd = match wasi_ext_lib::fcntl(
-            fd,
-            wasi_ext_lib::FcntlCommand::F_MVFD { min_fd_num: 10 },
-        ) {
-            Ok(saved_fd) => saved_fd as wasi::Fd,
-            Err(err) => return Err(Report::msg(format!(
-                "fcntl: cannot move fd {}, errno: {}", fd, err,
-            ))),
-        };
+        let saved_fd =
+            match wasi_ext_lib::fcntl(fd, wasi_ext_lib::FcntlCommand::F_MVFD { min_fd_num: 10 }) {
+                Ok(saved_fd) => saved_fd as wasi::Fd,
+                Err(err) => {
+                    return Err(Report::msg(format!(
+                        "fcntl: cannot move fd {}, errno: {}",
+                        fd, err,
+                    )))
+                }
+            };
 
-        let flags = match wasi_ext_lib::fcntl(
-            saved_fd,
-            wasi_ext_lib::FcntlCommand::F_GETFD
-        ) {
+        let flags = match wasi_ext_lib::fcntl(saved_fd, wasi_ext_lib::FcntlCommand::F_GETFD) {
             Ok(flags) => flags as wasi::Fdflags,
-            Err(err) => return Err(Report::msg(format!(
-                "fcntl: cannot get flags of fd {}, errno: {}", fd, err,
-            ))),
+            Err(err) => {
+                return Err(Report::msg(format!(
+                    "fcntl: cannot get flags of fd {}, errno: {}",
+                    fd, err,
+                )))
+            }
         };
 
         if let Err(err) = wasi_ext_lib::fcntl(
             saved_fd,
             wasi_ext_lib::FcntlCommand::F_SETFD {
-                flags: wasi_ext_lib::WASI_EXT_FDFLAG_CLOEXEC
-            }
+                flags: wasi_ext_lib::WASI_EXT_FDFLAG_CLOEXEC,
+            },
         ) {
             return Err(Report::msg(format!(
-                "fcntl: cannot set flags of fd {}, errno: {}", fd, err,
+                "fcntl: cannot set flags of fd {}, errno: {}",
+                fd, err,
             )));
         }
 
@@ -90,34 +94,33 @@ impl SavedFd {
 
     #[cfg(not(target_os = "wasi"))]
     fn save_fd(fd: Fd) -> Result<Self, Report> {
-        let saved_fd = match nix::fcntl::fcntl(
-            fd,
-            nix::fcntl::F_DUPFD(10)
-        ) {
+        let saved_fd = match nix::fcntl::fcntl(fd, nix::fcntl::F_DUPFD(10)) {
             Ok(saved_fd) => saved_fd as Fd,
-            Err(err) => return Err(Report::msg(format!(
-                "fcntl: cannot duplicate fd {}, errno: {}", fd, err,
-            ))),
+            Err(err) => {
+                return Err(Report::msg(format!(
+                    "fcntl: cannot duplicate fd {}, errno: {}",
+                    fd, err,
+                )))
+            }
         };
 
-        let flags = match nix::fcntl::fcntl(
-            saved_fd,
-            nix::fcntl::F_GETFD
-        ) {
+        let flags = match nix::fcntl::fcntl(saved_fd, nix::fcntl::F_GETFD) {
             Ok(flags) => nix::fcntl::FdFlag::from_bits(flags).unwrap(),
-            Err(err) => return Err(Report::msg(format!(
-                "fcntl: cannot get flags of fd {}, errno: {}", fd, err,
-            ))),
+            Err(err) => {
+                return Err(Report::msg(format!(
+                    "fcntl: cannot get flags of fd {}, errno: {}",
+                    fd, err,
+                )))
+            }
         };
 
         if let Err(err) = nix::fcntl::fcntl(
             saved_fd,
-            nix::fcntl::F_SETFD(
-                nix::fcntl::FdFlag::FD_CLOEXEC
-            )
+            nix::fcntl::F_SETFD(nix::fcntl::FdFlag::FD_CLOEXEC),
         ) {
             return Err(Report::msg(format!(
-                "fcntl: cannot set flags of fd {}, errno: {}", fd, err,
+                "fcntl: cannot set flags of fd {}, errno: {}",
+                fd, err,
             )));
         }
 
@@ -409,11 +412,14 @@ impl<'a> InputInterpreter<'a> {
         background: bool,
         redirects: &mut Vec<Redirect>,
     ) -> i32 {
-
         fn restore_fds(fds: Vec<SavedFd>) {
             for saved_fd in fds.into_iter().rev() {
                 match saved_fd {
-                    SavedFd::Move { fd_src, fd_dst, fd_flags } => {
+                    SavedFd::Move {
+                        fd_src,
+                        fd_dst,
+                        fd_flags,
+                    } => {
                         #[cfg(target_os = "wasi")]
                         if let Err(err) = unsafe { wasi::fd_renumber(fd_src, fd_dst) } {
                             panic!("{}: fd_renumber: {}", env!("CARGO_PKG_NAME"), err);
@@ -421,7 +427,7 @@ impl<'a> InputInterpreter<'a> {
                             panic!("{}: fd_close: {}", env!("CARGO_PKG_NAME"), err);
                         } else if let Err(err) = wasi_ext_lib::fcntl(
                             fd_dst,
-                            wasi_ext_lib::FcntlCommand::F_SETFD { flags: fd_flags }
+                            wasi_ext_lib::FcntlCommand::F_SETFD { flags: fd_flags },
                         ) {
                             panic!("{}: fcntl: {}", env!("CARGO_PKG_NAME"), err);
                         }
@@ -431,10 +437,9 @@ impl<'a> InputInterpreter<'a> {
                             panic!("{}: dup2: {}", env!("CARGO_PKG_NAME"), err);
                         } else if let Err(err) = nix::unistd::close(fd_src) {
                             panic!("{}: close: {}", env!("CARGO_PKG_NAME"), err);
-                        } else if let Err(err) = nix::fcntl::fcntl(
-                            fd_dst,
-                            nix::fcntl::F_SETFD(fd_flags)
-                        ) {
+                        } else if let Err(err) =
+                            nix::fcntl::fcntl(fd_dst, nix::fcntl::F_SETFD(fd_flags))
+                        {
                             panic!("{}: fcntl: {}", env!("CARGO_PKG_NAME"), err);
                         }
                     }
@@ -593,7 +598,9 @@ impl<'a> InputInterpreter<'a> {
                         Ok(saved_fd) => fds_to_restore.push(saved_fd),
                         Err(err) => {
                             eprintln!(
-                                "{}: cannot store fd, errno: {}", env!("CARGO_PKG_NAME"), err
+                                "{}: cannot store fd, errno: {}",
+                                env!("CARGO_PKG_NAME"),
+                                err
                             );
                             exit_status = EXIT_FAILURE;
 
@@ -606,10 +613,7 @@ impl<'a> InputInterpreter<'a> {
             };
 
             #[cfg(target_os = "wasi")]
-            let fd_flags_res = wasi_ext_lib::fcntl(
-                fd_dst,
-                wasi_ext_lib::FcntlCommand::F_GETFD
-            );
+            let fd_flags_res = wasi_ext_lib::fcntl(fd_dst, wasi_ext_lib::FcntlCommand::F_GETFD);
 
             #[cfg(not(target_os = "wasi"))]
             let fd_flags_res = nix::fcntl::fcntl(fd_dst, nix::fcntl::F_GETFD);
@@ -620,9 +624,7 @@ impl<'a> InputInterpreter<'a> {
                     match SavedFd::save_fd(fd_dst) {
                         Ok(saved_fd) => fds_to_restore.push(saved_fd),
                         Err(err) => {
-                            eprintln!(
-                                "{}: {}", env!("CARGO_PKG_NAME"), err
-                            );
+                            eprintln!("{}: {}", env!("CARGO_PKG_NAME"), err);
                             exit_status = EXIT_FAILURE;
                             break;
                         }
@@ -644,7 +646,12 @@ impl<'a> InputInterpreter<'a> {
                     fds_to_restore.push(SavedFd::Close { fd: fd_dst });
                 }
                 Err(err) => {
-                    eprintln!("{}: fcntl: cannot get flags of fd {}, errno: {}", env!("CARGO_PKG_NAME"), fd_dst, err);
+                    eprintln!(
+                        "{}: fcntl: cannot get flags of fd {}, errno: {}",
+                        env!("CARGO_PKG_NAME"),
+                        fd_dst,
+                        err
+                    );
                     exit_status = EXIT_FAILURE;
 
                     break;
@@ -653,16 +660,12 @@ impl<'a> InputInterpreter<'a> {
 
             #[cfg(target_os = "wasi")]
             if let Err(err) = unsafe { wasi::fd_renumber(fd_src, fd_dst) } {
-                eprintln!(
-                    "{}: fd_renumber: {}", env!("CARGO_PKG_NAME"), err
-                );
+                eprintln!("{}: fd_renumber: {}", env!("CARGO_PKG_NAME"), err);
                 exit_status = EXIT_FAILURE;
                 break;
             } else if close_src {
                 if let Err(err) = unsafe { wasi::fd_close(fd_src) } {
-                    eprintln!(
-                        "{}: fd_close: {}", env!("CARGO_PKG_NAME"), err
-                    );
+                    eprintln!("{}: fd_close: {}", env!("CARGO_PKG_NAME"), err);
                     exit_status = EXIT_FAILURE;
                     break;
                 }
@@ -670,16 +673,12 @@ impl<'a> InputInterpreter<'a> {
 
             #[cfg(not(target_os = "wasi"))]
             if let Err(err) = nix::unistd::dup2(fd_src, fd_dst) {
-                eprintln!(
-                    "{}: dup2: {}", env!("CARGO_PKG_NAME"), err
-                );
+                eprintln!("{}: dup2: {}", env!("CARGO_PKG_NAME"), err);
                 exit_status = EXIT_FAILURE;
                 break;
             } else if close_src {
                 if let Err(err) = nix::unistd::close(fd_src) {
-                    eprintln!(
-                        "{}: close: {}", env!("CARGO_PKG_NAME"), err
-                    );
+                    eprintln!("{}: close: {}", env!("CARGO_PKG_NAME"), err);
                     exit_status = EXIT_FAILURE;
                     break;
                 }
