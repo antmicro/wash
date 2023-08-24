@@ -216,9 +216,12 @@ pub fn apply_redirects(redirects: &[Redirect]) -> io::Result<()> {
             }
         };
 
-        nix::unistd::dup2(fd_src, fd_dst)?;
+        if fd_src != fd_dst {
+            nix::unistd::dup2(fd_src, fd_dst)?;
+        } else {
+            continue;
+        }
 
-        // TODO: set cloexec instead of closing fds
         if let Redirect::Duplicate {
             fd_src: _,
             fd_dst: _,
