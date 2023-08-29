@@ -55,41 +55,47 @@ fn main() {
         env!("SHELL_COMPILE_DATE")
     );
 
+    let cli = Command::new(name)
+    .version(&version_short)
+    .long_version(&version_long)
+    .author("Antmicro <www.antmicro.com>")
+    .help_template(
+        "{before-help}{bin} {version}\n\
+        {about-with-newline}\n\
+        {usage-heading}\n\t{usage}\n\
+        {all-args}{after-help}",
+    )
+    // FILE - it is only for wash help printer
+    .arg(
+        Arg::new("FILE")
+        .help("Execute commands from file")
+        .action(ArgAction::Append)
+    )
+    .arg(
+        Arg::new("command")
+            .help("Execute provided command")
+            .short('c')
+            .long("command")
+            .value_name("COMMAND")
+            .action(ArgAction::Set),
+    );
+
+    // Run CLI parser to find script argument only
+    let pre_matches = cli.clone()
+        .ignore_errors(true)
+        .disable_help_flag(true)
+        .disable_version_flag(true)
+        .get_matches();
+
     // split CLI args to wash arguments and script arguments
     let all_args: Vec<String> = env::args().collect();
-    let (wash_args, script_args) = if let Some(idx) = all_args
-        .iter()
-        .skip(1)
-        .position(|arg| !arg.starts_with("-"))
-    {
-        // Add 1 to index, we skiped first element that is "wash"
-        let shell_idx = (idx + 1) as usize;
-        (&all_args[..shell_idx], &all_args[shell_idx..])
+    let (wash_args, script_args) = if let Some(script_idx) = pre_matches.index_of("FILE") {
+        (&all_args[..script_idx], &all_args[script_idx..])
     } else {
         (&all_args[..], &[] as &[String])
     };
 
-    let matches = Command::new(name)
-        .version(&version_short)
-        .long_version(&version_long)
-        .author("Antmicro <www.antmicro.com>")
-        .help_template(
-            "{before-help}{bin} {version}\n\
-            {about-with-newline}\n\
-            {usage-heading}\n\t{usage}\n\
-            {all-args}{after-help}",
-        )
-        // FILE - it is only for wash help printer
-        .arg(Arg::new("FILE").help("Execute commands from file"))
-        .arg(
-            Arg::new("command")
-                .help("Execute provided command")
-                .short('c')
-                .long("command")
-                .value_name("COMMAND")
-                .action(ArgAction::Set),
-        )
-        .get_matches_from(wash_args);
+    let matches = cli.get_matches_from(wash_args);
 
     let pwd;
     let should_echo;
