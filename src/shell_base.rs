@@ -1063,12 +1063,14 @@ impl Shell {
 
             match full_path {
                 Ok(path) => {
-                    let file = File::open(&path).unwrap();
-
-                    let mut lines = BufReader::new(file).lines();
-                    let reader_result = lines.next();
-                    // close opened file to prevent fd leak
-                    drop(lines);
+                    let reader_result = match File::open(&path) {
+                        Ok(file) => {
+                            BufReader::new(file).lines().next()
+                        },
+                        Err(err) => {
+                            panic!("Cannot open executable: {}", err);
+                        },
+                    };
 
                     if let Some(Ok(line)) = reader_result {
                         // file starts with valid UTF-8, most likely a script
