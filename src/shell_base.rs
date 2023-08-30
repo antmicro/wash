@@ -417,18 +417,6 @@ impl Default for InternalEventSource {
             }
         };
 
-        if let Err(err) = wasi_ext_lib::fcntl(
-            event_source_fd as Fd,
-            wasi_ext_lib::FcntlCommand::F_SETFD {
-                flags: wasi_ext_lib::WASI_EXT_FDFLAG_CLOEXEC,
-            },
-        ) {
-            panic!(
-                "Cannot set cloexec flag for event_source_fd, error code: {}",
-                err
-            );
-        }
-
         InternalEventSource {
             subs: [
                 wasi::Subscription {
