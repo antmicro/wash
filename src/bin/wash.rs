@@ -12,7 +12,7 @@ use std::os::raw::c_int;
 use std::path::PathBuf;
 use std::process;
 
-use clap::{Arg, Command};
+use clap::{Arg, ArgAction, Command};
 
 use wash::Shell;
 
@@ -40,34 +40,36 @@ fn main() {
         path.set_extension("");
         path.file_name().unwrap().to_str().unwrap().to_string()
     };
-    let version_short = &*format!(
+    let version_short = format!(
         "{}-{} ({})\nCopyright (c) 2021-{} Antmicro <www.antmicro.com>",
         env!("CARGO_PKG_VERSION"),
         env!("SHELL_COMMIT_HASH"),
         env!("SHELL_TARGET"),
         env!("SHELL_COMMIT_DATE").split('-').collect::<Vec<&str>>()[0],
     );
-    let matches = Command::new(name)
+
+    let version_long = format!(
+        "{}\nCommit date: {}\nBuild date: {}",
+        version_short,
+        env!("SHELL_COMMIT_DATE"),
+        env!("SHELL_COMPILE_DATE")
+    );
+
+    let cli = Command::new(name)
         .version(version_short)
-        .long_version(&*format!(
-            "{}\nCommit date: {}\nBuild date: {}",
-            version_short,
-            env!("SHELL_COMMIT_DATE"),
-            env!("SHELL_COMPILE_DATE")
-        ))
+        .long_version(version_long)
         .author("Antmicro <www.antmicro.com>")
         .help_template(
             "{before-help}{bin} {version}\n\
-            {about-with-newline}\n\
-            {usage-heading}\n\t{usage}\n\
-            {all-args}{after-help}",
+        {about-with-newline}\n\
+        {usage-heading}\n\t{usage}\n\
+        {all-args}{after-help}",
         )
-        // FILE - first value is the script path, other values are CLI args
+        // FILE - it is only for wash help printer
         .arg(
             Arg::new("FILE")
                 .help("Execute commands from file")
-                .multiple_values(true)
-                .index(1),
+                .action(ArgAction::Append),
         )
         .arg(
             Arg::new("command")
@@ -75,9 +77,26 @@ fn main() {
                 .short('c')
                 .long("command")
                 .value_name("COMMAND")
-                .takes_value(true),
-        )
+                .action(ArgAction::Set),
+        );
+
+    // Run CLI parser to find script argument only
+    let pre_matches = cli
+        .clone()
+        .ignore_errors(true)
+        .disable_help_flag(true)
+        .disable_version_flag(true)
         .get_matches();
+
+    // split CLI args to wash arguments and script arguments
+    let all_args: Vec<String> = env::args().collect();
+    let (wash_args, script_args) = if let Some(script_idx) = pre_matches.index_of("FILE") {
+        (&all_args[..script_idx], &all_args[script_idx..])
+    } else {
+        (&all_args[..], &[] as &[String])
+    };
+
+    let matches = cli.get_matches_from(wash_args);
 
     let pwd;
     let should_echo;
@@ -119,11 +138,11 @@ fn main() {
     let mut shell = Shell::new(
         should_echo,
         &pwd,
-        if let Some(args) = matches.values_of("FILE") {
-            len = args.len();
-            let collected = args.map(String::from).collect::<VecDeque<String>>();
-            script = collected[0].clone();
-            collected
+        if !script_args.is_empty() {
+            let script_args: VecDeque<String> = script_args.iter().map(String::from).collect();
+            len = script_args.len();
+            script = script_args[0].clone();
+            script_args
         } else {
             len = 0;
             script = String::from("");
@@ -131,7 +150,7 @@ fn main() {
         },
     );
 
-    let result = if let Some(command) = matches.value_of("command") {
+    let result = if let Some(command) = matches.get_one::<String>("command") {
         shell.run_command(command)
     } else if len != 0 {
         shell.run_script(PathBuf::from(script))
