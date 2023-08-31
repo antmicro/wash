@@ -56,32 +56,33 @@ fn main() {
     );
 
     let cli = Command::new(name)
-    .version(&version_short)
-    .long_version(&version_long)
-    .author("Antmicro <www.antmicro.com>")
-    .help_template(
-        "{before-help}{bin} {version}\n\
+        .version(version_short)
+        .long_version(version_long)
+        .author("Antmicro <www.antmicro.com>")
+        .help_template(
+            "{before-help}{bin} {version}\n\
         {about-with-newline}\n\
         {usage-heading}\n\t{usage}\n\
         {all-args}{after-help}",
-    )
-    // FILE - it is only for wash help printer
-    .arg(
-        Arg::new("FILE")
-        .help("Execute commands from file")
-        .action(ArgAction::Append)
-    )
-    .arg(
-        Arg::new("command")
-            .help("Execute provided command")
-            .short('c')
-            .long("command")
-            .value_name("COMMAND")
-            .action(ArgAction::Set),
-    );
+        )
+        // FILE - it is only for wash help printer
+        .arg(
+            Arg::new("FILE")
+                .help("Execute commands from file")
+                .action(ArgAction::Append),
+        )
+        .arg(
+            Arg::new("command")
+                .help("Execute provided command")
+                .short('c')
+                .long("command")
+                .value_name("COMMAND")
+                .action(ArgAction::Set),
+        );
 
     // Run CLI parser to find script argument only
-    let pre_matches = cli.clone()
+    let pre_matches = cli
+        .clone()
         .ignore_errors(true)
         .disable_help_flag(true)
         .disable_version_flag(true)
@@ -137,8 +138,8 @@ fn main() {
     let mut shell = Shell::new(
         should_echo,
         &pwd,
-        if script_args.len() > 0 {
-            let script_args: VecDeque<String> = script_args.into_iter().map(String::from).collect();
+        if !script_args.is_empty() {
+            let script_args: VecDeque<String> = script_args.iter().map(String::from).collect();
             len = script_args.len();
             script = script_args[0].clone();
             script_args
