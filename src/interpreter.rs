@@ -507,28 +507,7 @@ impl<'a> InputInterpreter<'a> {
                 self.handle_compound_if(shell, conditionals, else_branch, background)
             }
             ast::CompoundCommandKind::While(guard_body) => {
-                let mut exit_status = EXIT_SUCCESS;
-                'outer: loop {
-                    for cmd in guard_body.guard.iter() {
-                        exit_status = self.handle_top_level_command(shell, cmd);
-                        if exit_status == EXIT_INTERRUPTED {
-                            break 'outer;
-                        }
-                    }
-
-                    if exit_status != EXIT_SUCCESS {
-                        shell.last_exit_status = EXIT_SUCCESS;
-                        break 'outer;
-                    }
-
-                    for cmd in guard_body.body.iter() {
-                        exit_status = self.handle_top_level_command(shell, cmd);
-                        if exit_status == EXIT_INTERRUPTED {
-                            break 'outer;
-                        }
-                    }
-                }
-                exit_status
+                self.handle_compound_while(shell, guard_body, background)
             }
             ast::CompoundCommandKind::Case { word, arms } => {
                 let mut exit_status = EXIT_SUCCESS;
@@ -740,6 +719,38 @@ impl<'a> InputInterpreter<'a> {
         };
         exit_status
     } 
+
+    fn handle_compound_while (
+        &self,
+        shell: &mut Shell,
+        guard_body: &GuardBodyPair<TopLevelCommand<String>>,
+        // TODO: implement background jobs in compounds
+        _background: bool,
+    ) -> i32 {
+        let mut exit_status = EXIT_SUCCESS;
+        loop {
+            for cmd in guard_body.guard.iter() {
+                exit_status = self.handle_top_level_command(shell, cmd);
+                if exit_status == EXIT_INTERRUPTED {
+                    return exit_status;
+                }
+            }
+
+            if exit_status != EXIT_SUCCESS {
+                exit_status = EXIT_SUCCESS;
+                shell.last_exit_status = EXIT_SUCCESS;
+                break;
+            }
+
+            for cmd in guard_body.body.iter() {
+                exit_status = self.handle_top_level_command(shell, cmd);
+                if exit_status == EXIT_INTERRUPTED {
+                    return exit_status;
+                }
+            }
+        }
+        exit_status
+    }
 
     fn handle_simple_command(
         &self,
