@@ -14,9 +14,9 @@ use std::os::fd::IntoRawFd;
 use std::path::Path;
 use std::path::PathBuf;
 
-use conch_parser::ast::{self, ComplexWord::Single, SimpleWord::Param, TopLevelWord, Word::Simple};
+use conch_parser::ast::{self, ComplexWord::Single, SimpleWord::Param, TopLevelWord, TopLevelCommand, Word::Simple};
 use conch_parser::lexer::Lexer;
-use conch_parser::parse::{DefaultParser, ParseError};
+use conch_parser::parse::{DefaultParser, ParseError, SourcePos};
 
 use glob::Pattern;
 
@@ -335,76 +335,14 @@ impl<'a> InputInterpreter<'a> {
             return EXIT_FAILURE;
         }
 
-        #[cfg(target_os = "wasi")]
-        if let ast::CompoundCommandKind::Subshell {
-            body: _,
-            start_pos,
-            end_pos,
-        } = kind
-        {
-            let subshell_cmds = &self.input[(start_pos.byte + 1)..(end_pos.byte)];
-
-            let mut args_vec = vec!["-c".to_string(), subshell_cmds.to_string()];
-
-            return match shell.execute_command(
-                "wash",
-                &mut args_vec,
-                &HashMap::new(),
-                background,
-                redirects,
-            ) {
-                Ok(result) => result,
-                Err(error) => {
-                    eprintln!("{} error: {:?}", env!("CARGO_PKG_NAME"), error);
-                    EXIT_FAILURE
-                }
-            };
-        }
-
-        #[cfg(not(target_os = "wasi"))]
         if let ast::CompoundCommandKind::Subshell {
             body,
-            start_pos: _,
-            end_pos: _,
-        } = kind
-        {
-            match unsafe { nix::unistd::fork() } {
-                Ok(nix::unistd::ForkResult::Parent { child }) => {
-                    return if !background {
-                        wait_for_child(child)
-                    } else {
-                        EXIT_SUCCESS
-                    };
-                }
-                Ok(nix::unistd::ForkResult::Child) => {
-                    // Apply all redirects passed to subshell
-                    if let Err(err) = apply_redirects(redirects) {
-                        eprintln!("{}: {}", env!("CARGO_PKG_NAME"), err);
-                        std::process::exit(EXIT_FAILURE);
-                    }
-
-                    let mut exit_status = EXIT_SUCCESS;
-
-                    // Run subshell commands
-                    for subshell_cmd in body {
-                        exit_status = self.handle_top_level_command(shell, subshell_cmd);
-                        if exit_status == EXIT_INTERRUPTED {
-                            break;
-                        }
-                    }
-
-                    std::process::exit(exit_status);
-                }
-                Err(err) => {
-                    eprintln!(
-                        "{} error: subshell fork failed: {}",
-                        env!("CARGO_PKG_NAME"),
-                        err
-                    );
-                    return EXIT_FAILURE;
-                }
-            }
+            start_pos,
+            end_pos,
+        } = kind {
+            return self.handle_compound_subshell(shell, body, start_pos, end_pos, background, redirects)
         }
+
 
         let mut exit_status = EXIT_SUCCESS;
 
@@ -700,6 +638,85 @@ impl<'a> InputInterpreter<'a> {
         SavedFd::restore_fds(fds_to_restore);
         exit_status
     }
+
+    #[cfg(target_os = "wasi")]
+    fn handle_compound_subshell(
+        &self,
+        shell: &mut Shell,
+        _body: &Vec<TopLevelCommand<String>>,
+        start_pos: &SourcePos,
+        end_pos: &SourcePos,
+        background: bool,
+        redirects: &mut Vec<Redirect>,
+    ) -> i32 {
+        let subshell_cmds = &self.input[(start_pos.byte + 1)..(end_pos.byte)];
+
+        let mut args_vec = vec!["-c".to_string(), subshell_cmds.to_string()];
+
+        match shell.execute_command(
+            "wash",
+            &mut args_vec,
+            &HashMap::new(),
+            background,
+            redirects,
+        ) {
+            Ok(result) => result,
+            Err(error) => {
+                eprintln!("{} error: {:?}", env!("CARGO_PKG_NAME"), error);
+                EXIT_FAILURE
+            }
+        }
+    }
+
+    #[cfg(not(target_os = "wasi"))]
+    fn handle_compound_subshell(
+        &self,
+        shell: &mut Shell,
+        body: &Vec<TopLevelCommand<String>>,
+        _start_pos: &SourcePos,
+        _end_pos: &SourcePos,
+        background: bool,
+        redirects: &mut Vec<Redirect>,
+    ) -> i32 {
+        match unsafe { nix::unistd::fork() } {
+            Ok(nix::unistd::ForkResult::Parent { child }) => {
+                return if !background {
+                    wait_for_child(child)
+                } else {
+                    EXIT_SUCCESS
+                }
+            }
+            Ok(nix::unistd::ForkResult::Child) => {
+                // Apply all redirects passed to subshell
+                if let Err(err) = apply_redirects(redirects) {
+                    eprintln!("{}: {}", env!("CARGO_PKG_NAME"), err);
+                    std::process::exit(EXIT_FAILURE);
+                }
+
+                let mut exit_status = EXIT_SUCCESS;
+
+                // Run subshell commands
+                for subshell_cmd in body {
+                    exit_status = self.handle_top_level_command(shell, subshell_cmd);
+                    if exit_status == EXIT_INTERRUPTED {
+                        break;
+                    }
+                }
+
+                std::process::exit(exit_status);
+            }
+            Err(err) => {
+                eprintln!(
+                    "{} error: subshell fork failed: {}",
+                    env!("CARGO_PKG_NAME"),
+                    err
+                );
+                EXIT_FAILURE
+            }
+        }
+    }
+
+
 
     fn handle_simple_command(
         &self,
