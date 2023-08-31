@@ -14,7 +14,7 @@ use std::os::fd::IntoRawFd;
 use std::path::Path;
 use std::path::PathBuf;
 
-use conch_parser::ast::{self, ComplexWord::Single, GuardBodyPair, SimpleWord::Param, TopLevelWord, TopLevelCommand, Word::Simple};
+use conch_parser::ast::{self, ComplexWord::Single, GuardBodyPair, PatternBodyPair, SimpleWord::Param, TopLevelWord, TopLevelCommand, Word::Simple};
 use conch_parser::lexer::Lexer;
 use conch_parser::parse::{DefaultParser, ParseError, SourcePos};
 
@@ -510,39 +510,7 @@ impl<'a> InputInterpreter<'a> {
                 self.handle_compound_while(shell, guard_body, background)
             }
             ast::CompoundCommandKind::Case { word, arms } => {
-                let mut exit_status = EXIT_SUCCESS;
-                let handled_word = self
-                    .handle_top_level_word(shell, word)
-                    .unwrap_or("".to_string());
-                for arm in arms {
-                    if arm.patterns.iter().any(|pattern| {
-                        // TODO: Ctrl-C is not handled during processing pattern because `Subst`
-                        // is not handled and we cannot execute any command in pattern
-                        if let Some(handled_pattern) = self.handle_top_level_word(shell, pattern) {
-                            if let Ok(pat) = Pattern::new(&handled_pattern) {
-                                pat.matches(&handled_word)
-                            } else {
-                                // if the pattern contains invalid wildcard, match against literal pattern
-                                // TODO: if there are multiple valid wildcards in the pattern and at least
-                                // one invalid, the pattern will be taken as literal.
-                                // e.g. '[a*' won't match with [abbb
-                                handled_pattern == handled_word
-                            }
-                        } else {
-                            // When command fails then bash try to match handled_word with empty string
-                            handled_word.is_empty()
-                        }
-                    }) {
-                        for command in arm.body.iter() {
-                            exit_status = self.handle_top_level_command(shell, command);
-                            if exit_status == EXIT_INTERRUPTED {
-                                break;
-                            }
-                        }
-                        break;
-                    }
-                }
-                exit_status
+                self.handle_compound_case(shell, word, arms, background)
             }
             any => {
                 eprintln!("CompoundCommandKind not yet handled: {any:#?}");
@@ -747,6 +715,49 @@ impl<'a> InputInterpreter<'a> {
                 if exit_status == EXIT_INTERRUPTED {
                     return exit_status;
                 }
+            }
+        }
+        exit_status
+    }
+
+    fn handle_compound_case (
+        &self,
+        shell: &mut Shell,
+        word: &TopLevelWord<String>,
+        arms: &Vec<PatternBodyPair<TopLevelWord<String>, TopLevelCommand<String>>>,
+        // TODO: implement background jobs in compounds
+        _background: bool,
+    ) -> i32 {
+        let mut exit_status = EXIT_SUCCESS;
+        let handled_word = self
+            .handle_top_level_word(shell, word)
+            .unwrap_or("".to_string());
+        for arm in arms {
+            if arm.patterns.iter().any(|pattern| {
+                // TODO: Ctrl-C is not handled during processing pattern because `Subst`
+                // is not handled and we cannot execute any command in pattern
+                if let Some(handled_pattern) = self.handle_top_level_word(shell, pattern) {
+                    if let Ok(pat) = Pattern::new(&handled_pattern) {
+                        pat.matches(&handled_word)
+                    } else {
+                        // if the pattern contains invalid wildcard, match against literal pattern
+                        // TODO: if there are multiple valid wildcards in the pattern and at least
+                        // one invalid, the pattern will be taken as literal.
+                        // e.g. '[a*' won't match with [abbb
+                        handled_pattern == handled_word
+                    }
+                } else {
+                    // When command fails then bash try to match handled_word with empty string
+                    handled_word.is_empty()
+                }
+            }) {
+                for command in arm.body.iter() {
+                    exit_status = self.handle_top_level_command(shell, command);
+                    if exit_status == EXIT_INTERRUPTED {
+                        break;
+                    }
+                }
+                break;
             }
         }
         exit_status
