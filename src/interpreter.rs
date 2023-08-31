@@ -14,7 +14,7 @@ use std::os::fd::IntoRawFd;
 use std::path::Path;
 use std::path::PathBuf;
 
-use conch_parser::ast::{self, ComplexWord::Single, SimpleWord::Param, TopLevelWord, TopLevelCommand, Word::Simple};
+use conch_parser::ast::{self, ComplexWord::Single, GuardBodyPair, SimpleWord::Param, TopLevelWord, TopLevelCommand, Word::Simple};
 use conch_parser::lexer::Lexer;
 use conch_parser::parse::{DefaultParser, ParseError, SourcePos};
 
@@ -504,39 +504,7 @@ impl<'a> InputInterpreter<'a> {
                 conditionals,
                 else_branch,
             } => {
-                let mut exit_status = EXIT_SUCCESS;
-                let mut guard_status = EXIT_SUCCESS;
-                'outer: for guard_body in conditionals {
-                    for command in &guard_body.guard {
-                        guard_status = self.handle_top_level_command(shell, command);
-                        if guard_status == EXIT_INTERRUPTED {
-                            exit_status = guard_status;
-                            break 'outer;
-                        }
-                    }
-                    if guard_status == EXIT_SUCCESS {
-                        for command in &guard_body.body {
-                            exit_status = self.handle_top_level_command(shell, command);
-                            if exit_status == EXIT_INTERRUPTED {
-                                break 'outer;
-                            }
-                        }
-                        break 'outer;
-                    } else {
-                        shell.last_exit_status = EXIT_SUCCESS;
-                    }
-                }
-                if guard_status != EXIT_SUCCESS && guard_status != EXIT_INTERRUPTED {
-                    if let Some(els) = else_branch {
-                        for command in els {
-                            exit_status = self.handle_top_level_command(shell, command);
-                            if exit_status == EXIT_INTERRUPTED {
-                                break;
-                            }
-                        }
-                    }
-                };
-                exit_status
+                self.handle_compound_if(shell, conditionals, else_branch, background)
             }
             ast::CompoundCommandKind::While(guard_body) => {
                 let mut exit_status = EXIT_SUCCESS;
@@ -730,6 +698,48 @@ impl<'a> InputInterpreter<'a> {
         }
         exit_status
     }
+
+    fn handle_compound_if (
+        &self,
+        shell: &mut Shell,
+        conditionals: &Vec<GuardBodyPair<TopLevelCommand<String>>>,
+        else_branch: &Option<Vec<TopLevelCommand<String>>>,
+        // TODO: implement background jobs in compounds
+        _background: bool,
+    ) -> i32 {
+        let mut exit_status = EXIT_SUCCESS;
+        let mut guard_status = EXIT_SUCCESS;
+        for guard_body in conditionals {
+            for command in &guard_body.guard {
+                guard_status = self.handle_top_level_command(shell, command);
+                if guard_status == EXIT_INTERRUPTED {
+                    return guard_status;
+                }
+            }
+            if guard_status == EXIT_SUCCESS {
+                for command in &guard_body.body {
+                    exit_status = self.handle_top_level_command(shell, command);
+                    if exit_status == EXIT_INTERRUPTED {
+                        return exit_status;
+                    }
+                }
+                return exit_status;
+            } else {
+                shell.last_exit_status = EXIT_SUCCESS;
+            }
+        }
+        if guard_status != EXIT_SUCCESS && guard_status != EXIT_INTERRUPTED {
+            if let Some(els) = else_branch {
+                for command in els {
+                    exit_status = self.handle_top_level_command(shell, command);
+                    if exit_status == EXIT_INTERRUPTED {
+                        break;
+                    }
+                }
+            }
+        };
+        exit_status
+    } 
 
     fn handle_simple_command(
         &self,
