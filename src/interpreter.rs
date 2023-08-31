@@ -493,44 +493,12 @@ impl<'a> InputInterpreter<'a> {
                 end_pos: _,
             } => unreachable!(),
             ast::CompoundCommandKind::For { var, words, body } => {
-                let mut exit_status = EXIT_SUCCESS;
-                if let Some(for_list) = words {
-                    let mut finall_list: Vec<String> = vec![];
-
-                    for word in for_list {
-                        match word {
-                            TopLevelWord(Single(Simple(Param(_)))) => {
-                                if let TopLevelWord(Single(Simple(param_word))) = word {
-                                    if let Some(value) = self.handle_simple_word(shell, param_word)
-                                    {
-                                        finall_list.append(
-                                            &mut value
-                                                .split_whitespace()
-                                                .map(String::from)
-                                                .collect::<Vec<String>>(),
-                                        );
-                                    }
-                                }
-                            }
-                            word => {
-                                if let Some(w) = self.handle_top_level_word(shell, word) {
-                                    finall_list.push(w);
-                                }
-                            }
-                        }
-                    }
-
-                    'outer: for word in finall_list {
-                        env::set_var(var, word);
-                        for command in body {
-                            exit_status = self.handle_top_level_command(shell, command);
-                            if exit_status == EXIT_INTERRUPTED {
-                                break 'outer;
-                            }
-                        }
-                    }
+                match words {
+                    Some(words) => self.handle_compound_for(
+                        shell, var, words, body, background
+                    ),
+                    None => EXIT_SUCCESS
                 }
-                exit_status
             }
             ast::CompoundCommandKind::If {
                 conditionals,
@@ -716,7 +684,52 @@ impl<'a> InputInterpreter<'a> {
         }
     }
 
+    fn handle_compound_for (
+        &self,
+        shell: &mut Shell,
+        var: &String,
+        word_list: &Vec<TopLevelWord<String>>,
+        body: &Vec<TopLevelCommand<String>>,
+        // TODO: implement background jobs in compounds
+        _background: bool,
+    ) -> i32 {
+        let mut exit_status = EXIT_SUCCESS;
+        let mut finall_list: Vec<String> = vec![];
 
+        for word in word_list {
+            match word {
+                TopLevelWord(Single(Simple(Param(_)))) => {
+                    if let TopLevelWord(Single(Simple(param_word))) = word {
+                        if let Some(value) = self.handle_simple_word(shell, param_word)
+                        {
+                            finall_list.append(
+                                &mut value
+                                    .split_whitespace()
+                                    .map(String::from)
+                                    .collect::<Vec<String>>(),
+                            );
+                        }
+                    }
+                }
+                word => {
+                    if let Some(w) = self.handle_top_level_word(shell, word) {
+                        finall_list.push(w);
+                    }
+                }
+            }
+        }
+
+        for word in finall_list {
+            env::set_var(var, word);
+            for command in body {
+                exit_status = self.handle_top_level_command(shell, command);
+                if exit_status == EXIT_INTERRUPTED {
+                    return exit_status;
+                }
+            }
+        }
+        exit_status
+    }
 
     fn handle_simple_command(
         &self,
