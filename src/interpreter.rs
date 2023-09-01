@@ -8,13 +8,17 @@ use std::collections::HashMap;
 use std::env;
 #[cfg(target_os = "wasi")]
 use std::fs;
+#[cfg(target_os = "wasi")]
 use std::fs::OpenOptions;
 use std::os::fd::IntoRawFd;
 #[cfg(target_os = "wasi")]
 use std::path::Path;
 use std::path::PathBuf;
 
-use conch_parser::ast::{self, ComplexWord::Single, GuardBodyPair, PatternBodyPair, SimpleWord::Param, TopLevelWord, TopLevelCommand, Word::Simple};
+use conch_parser::ast::{
+    self, ComplexWord::Single, GuardBodyPair, PatternBodyPair, SimpleWord::Param, TopLevelCommand,
+    TopLevelWord, Word::Simple,
+};
 use conch_parser::lexer::Lexer;
 use conch_parser::parse::{DefaultParser, ParseError, SourcePos};
 
@@ -339,173 +343,36 @@ impl<'a> InputInterpreter<'a> {
             body,
             start_pos,
             end_pos,
-        } = kind {
-            return self.handle_compound_subshell(shell, body, start_pos, end_pos, background, redirects)
+        } = kind
+        {
+            return self
+                .handle_compound_subshell(shell, body, start_pos, end_pos, background, redirects);
         }
 
-
-        let mut exit_status = EXIT_SUCCESS;
-
-        // fds_to_restore[i] = (src_fd, dst_fd); src_fd shoulde be greater than 9
         let mut fds_to_restore: Vec<SavedFd> = Vec::new();
 
         for redirect in redirects.iter() {
-            let (fd_src, fd_dst, close_src): (Fd, Fd, bool) = match redirect {
-                Redirect::Read(fd, path)
-                | Redirect::Write(fd, path)
-                | Redirect::Append(fd, path)
-                | Redirect::ReadWrite(fd, path) => {
-                    let mut open_options = OpenOptions::new();
-                    match redirect {
-                        Redirect::Read(_, _) => {
-                            open_options.read(true);
-                        }
-                        Redirect::Write(_, _) => {
-                            open_options.write(true).truncate(true).create(true);
-                        }
-                        Redirect::Append(_, _) => {
-                            open_options.write(true).append(true).create(true);
-                        }
-                        Redirect::ReadWrite(_, _) => {
-                            open_options.read(true).write(true).create(true);
-                        }
-                        _ => unreachable!(),
-                    };
-
-                    let opened_fd = match open_options.open(path) {
-                        Ok(file) => {
-                            // After this line, user is responsible for closing fd
-                            file.into_raw_fd() as Fd
-                        }
-                        Err(err) => {
-                            eprintln!("{}: {}: {}", env!("CARGO_PKG_NAME"), path, err);
-                            exit_status = EXIT_FAILURE;
-                            break;
-                        }
-                    };
-
-                    (opened_fd, *fd, true)
-                }
-                Redirect::PipeIn(fd) => (*fd, STDIN, false),
-                Redirect::PipeOut(fd) => (*fd, STDOUT, false),
-                Redirect::Duplicate { fd_src, fd_dst } => (*fd_src, *fd_dst, false),
-                Redirect::Close(fd) => {
-                    match SavedFd::save_fd(*fd) {
-                        Ok(saved_fd) => fds_to_restore.push(saved_fd),
-                        Err(err) => {
-                            eprintln!(
-                                "{}: cannot store fd, errno: {}",
-                                env!("CARGO_PKG_NAME"),
-                                err
-                            );
-                            exit_status = EXIT_FAILURE;
-
-                            break;
-                        }
-                    }
-
-                    continue;
-                }
-            };
-
-            #[cfg(target_os = "wasi")]
-            let fd_flags_res = wasi_ext_lib::fcntl(fd_dst, wasi_ext_lib::FcntlCommand::F_GETFD);
-
-            #[cfg(not(target_os = "wasi"))]
-            let fd_flags_res = nix::fcntl::fcntl(fd_dst, nix::fcntl::F_GETFD);
-
-            match fd_flags_res {
-                Ok(_) if fd_dst != fd_src => {
-                    // Make copy of fd
-                    match SavedFd::save_fd(fd_dst) {
-                        Ok(saved_fd) => fds_to_restore.push(saved_fd),
-                        Err(err) => {
-                            eprintln!("{}: {}", env!("CARGO_PKG_NAME"), err);
-                            exit_status = EXIT_FAILURE;
-                            break;
-                        }
-                    }
-                }
-                Ok(_) => {
-                    // Case when file is already opened on dst_fd, skip fd_renumber
-                    fds_to_restore.push(SavedFd::Close { fd: fd_dst });
-                    continue;
-                }
-                #[cfg(target_os = "wasi")]
-                Err(err) if err == wasi::ERRNO_BADF.raw().into() => {
-                    // We can make redirect without saving fd
-                    fds_to_restore.push(SavedFd::Close { fd: fd_dst });
-                }
-                #[cfg(not(target_os = "wasi"))]
-                Err(nix::errno::Errno::EBADF) => {
-                    // We can make redirect without saving fd
-                    fds_to_restore.push(SavedFd::Close { fd: fd_dst });
-                }
-                Err(err) => {
-                    eprintln!(
-                        "{}: fcntl: cannot get flags of fd {}, errno: {}",
-                        env!("CARGO_PKG_NAME"),
-                        fd_dst,
-                        err
-                    );
-                    exit_status = EXIT_FAILURE;
-
-                    break;
-                }
-            }
-
-            #[cfg(target_os = "wasi")]
-            if let Err(err) = unsafe { wasi::fd_renumber(fd_src, fd_dst) } {
-                eprintln!("{}: fd_renumber: {}", env!("CARGO_PKG_NAME"), err);
-                exit_status = EXIT_FAILURE;
-                break;
-            } else if close_src {
-                if let Err(err) = unsafe { wasi::fd_close(fd_src) } {
-                    eprintln!("{}: fd_close: {}", env!("CARGO_PKG_NAME"), err);
-                    exit_status = EXIT_FAILURE;
-                    break;
-                }
-            }
-
-            #[cfg(not(target_os = "wasi"))]
-            if let Err(err) = nix::unistd::dup2(fd_src, fd_dst) {
-                eprintln!("{}: dup2: {}", env!("CARGO_PKG_NAME"), err);
-                exit_status = EXIT_FAILURE;
-                break;
-            } else if close_src {
-                if let Err(err) = nix::unistd::close(fd_src) {
-                    eprintln!("{}: close: {}", env!("CARGO_PKG_NAME"), err);
-                    exit_status = EXIT_FAILURE;
-                    break;
-                }
+            if let Err(err) = SavedFd::process_redirect(redirect, &mut fds_to_restore) {
+                eprintln!("{}: {}", env!("CARGO_PKG_NAME"), err);
+                SavedFd::restore_fds(fds_to_restore);
+                return EXIT_FAILURE;
             }
         }
 
-        if exit_status != EXIT_SUCCESS {
-            SavedFd::restore_fds(fds_to_restore);
-            return exit_status;
-        }
-
-        exit_status = match kind {
+        let exit_status = match kind {
             ast::CompoundCommandKind::Subshell {
                 body: _,
                 start_pos: _,
                 end_pos: _,
             } => unreachable!(),
-            ast::CompoundCommandKind::For { var, words, body } => {
-                match words {
-                    Some(words) => self.handle_compound_for(
-                        shell, var, words, body, background
-                    ),
-                    None => EXIT_SUCCESS
-                }
-            }
+            ast::CompoundCommandKind::For { var, words, body } => match words {
+                Some(words) => self.handle_compound_for(shell, var, words, body, background),
+                None => EXIT_SUCCESS,
+            },
             ast::CompoundCommandKind::If {
                 conditionals,
                 else_branch,
-            } => {
-                self.handle_compound_if(shell, conditionals, else_branch, background)
-            }
+            } => self.handle_compound_if(shell, conditionals, else_branch, background),
             ast::CompoundCommandKind::While(guard_body) => {
                 self.handle_compound_while(shell, guard_body, background)
             }
@@ -526,11 +393,11 @@ impl<'a> InputInterpreter<'a> {
     fn handle_compound_subshell(
         &self,
         shell: &mut Shell,
-        _body: &Vec<TopLevelCommand<String>>,
+        _body: &[TopLevelCommand<String>],
         start_pos: &SourcePos,
         end_pos: &SourcePos,
         background: bool,
-        redirects: &mut Vec<Redirect>,
+        redirects: &[Redirect],
     ) -> i32 {
         let subshell_cmds = &self.input[(start_pos.byte + 1)..(end_pos.byte)];
 
@@ -559,11 +426,11 @@ impl<'a> InputInterpreter<'a> {
         _start_pos: &SourcePos,
         _end_pos: &SourcePos,
         background: bool,
-        redirects: &mut Vec<Redirect>,
+        redirects: &[Redirect],
     ) -> i32 {
         match unsafe { nix::unistd::fork() } {
             Ok(nix::unistd::ForkResult::Parent { child }) => {
-                return if !background {
+                if !background {
                     wait_for_child(child)
                 } else {
                     EXIT_SUCCESS
@@ -599,7 +466,7 @@ impl<'a> InputInterpreter<'a> {
         }
     }
 
-    fn handle_compound_for (
+    fn handle_compound_for(
         &self,
         shell: &mut Shell,
         var: &String,
@@ -615,8 +482,7 @@ impl<'a> InputInterpreter<'a> {
             match word {
                 TopLevelWord(Single(Simple(Param(_)))) => {
                     if let TopLevelWord(Single(Simple(param_word))) = word {
-                        if let Some(value) = self.handle_simple_word(shell, param_word)
-                        {
+                        if let Some(value) = self.handle_simple_word(shell, param_word) {
                             finall_list.append(
                                 &mut value
                                     .split_whitespace()
@@ -646,7 +512,7 @@ impl<'a> InputInterpreter<'a> {
         exit_status
     }
 
-    fn handle_compound_if (
+    fn handle_compound_if(
         &self,
         shell: &mut Shell,
         conditionals: &Vec<GuardBodyPair<TopLevelCommand<String>>>,
@@ -686,9 +552,9 @@ impl<'a> InputInterpreter<'a> {
             }
         };
         exit_status
-    } 
+    }
 
-    fn handle_compound_while (
+    fn handle_compound_while(
         &self,
         shell: &mut Shell,
         guard_body: &GuardBodyPair<TopLevelCommand<String>>,
@@ -720,7 +586,7 @@ impl<'a> InputInterpreter<'a> {
         exit_status
     }
 
-    fn handle_compound_case (
+    fn handle_compound_case(
         &self,
         shell: &mut Shell,
         word: &TopLevelWord<String>,

@@ -1064,12 +1064,10 @@ impl Shell {
             match full_path {
                 Ok(path) => {
                     let reader_result = match File::open(&path) {
-                        Ok(file) => {
-                            BufReader::new(file).lines().next()
-                        },
+                        Ok(file) => BufReader::new(file).lines().next(),
                         Err(err) => {
                             panic!("Cannot open executable: {}", err);
-                        },
+                        }
                     };
 
                     if let Some(Ok(line)) = reader_result {
