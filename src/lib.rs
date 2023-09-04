@@ -7,6 +7,7 @@
 pub mod internals;
 pub mod interpreter;
 pub mod output_device;
+pub mod saved_fd;
 pub mod shell_base;
 
 pub use shell_base::spawn;

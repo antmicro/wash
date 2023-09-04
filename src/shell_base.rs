@@ -216,9 +216,12 @@ pub fn apply_redirects(redirects: &[Redirect]) -> io::Result<()> {
             }
         };
 
-        nix::unistd::dup2(fd_src, fd_dst)?;
+        if fd_src != fd_dst {
+            nix::unistd::dup2(fd_src, fd_dst)?;
+        } else {
+            continue;
+        }
 
-        // TODO: set cloexec instead of closing fds
         if let Redirect::Duplicate {
             fd_src: _,
             fd_dst: _,
@@ -409,8 +412,8 @@ impl Default for InternalEventSource {
 
         let event_source_fd = match wasi_ext_lib::event_source_fd(wasi_ext_lib::WASI_EVENT_SIGINT) {
             Ok(fd) => fd,
-            Err(e) => {
-                panic!("Cannot obtain evnt_source_fd, error code = {}", e);
+            Err(err) => {
+                panic!("Cannot obtain event_source_fd, error code: {}", err);
             }
         };
 
@@ -1060,8 +1063,14 @@ impl Shell {
 
             match full_path {
                 Ok(path) => {
-                    let file = File::open(&path).unwrap();
-                    if let Some(Ok(line)) = BufReader::new(file).lines().next() {
+                    let reader_result = match File::open(&path) {
+                        Ok(file) => BufReader::new(file).lines().next(),
+                        Err(err) => {
+                            panic!("Cannot open executable: {}", err);
+                        }
+                    };
+
+                    if let Some(Ok(line)) = reader_result {
                         // file starts with valid UTF-8, most likely a script
                         let binary_path = if let Some(path) = line.strip_prefix("#!") {
                             path.trim().to_string()
