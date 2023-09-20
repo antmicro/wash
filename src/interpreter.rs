@@ -167,7 +167,7 @@ impl<'a> InputInterpreter<'a> {
                 .write(true)
                 .create(true)
                 .truncate(true)
-                .open("/proc/pipe0.txt")
+                .open("/tmp/pipe0.txt")
                 .expect("Cannot create pipe")
                 .into_raw_fd() as Fd;
 
@@ -202,13 +202,13 @@ impl<'a> InputInterpreter<'a> {
                     {
                         let read_end = OpenOptions::new()
                             .read(true)
-                            .open(format!("/proc/pipe{}.txt", i - 1))
+                            .open(format!("/tmp/pipe{}.txt", i - 1))
                             .expect("Cannot create pipe read end!");
                         let write_end = OpenOptions::new()
                             .write(true)
                             .create(true)
                             .truncate(true)
-                            .open(format!("/proc/pipe{i}.txt"))
+                            .open(format!("/tmp/pipe{i}.txt"))
                             .expect("Cannot create pipe write end!");
 
                         (read_end.into_raw_fd() as Fd, write_end.into_raw_fd() as Fd)
@@ -250,7 +250,7 @@ impl<'a> InputInterpreter<'a> {
                     {
                         OpenOptions::new()
                             .read(true)
-                            .open(format!("/proc/pipe{}.txt", cmds.len() - 2))
+                            .open(format!("/tmp/pipe{}.txt", cmds.len() - 2))
                             .expect("Cannot create pipe")
                             .into_raw_fd() as Fd
                     }
@@ -275,7 +275,7 @@ impl<'a> InputInterpreter<'a> {
             // TODO: temporary solution before in-memory files get implemented
             #[cfg(target_os = "wasi")]
             for i in 0..cmds.len() - 1 {
-                let pipe_name = format!("/proc/pipe{i}.txt");
+                let pipe_name = format!("/tmp/pipe{i}.txt");
                 if Path::new(pipe_name.as_str()).exists() {
                     fs::remove_file(pipe_name.as_str()).unwrap();
                 }
