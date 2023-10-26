@@ -246,7 +246,31 @@ pub fn spawn(
 ) -> Result<(i32, i32), i32> {
     #[cfg(target_os = "wasi")]
     {
-        wasi_ext_lib::spawn(path, args, env, background, redirects)
+        use wasi_ext_lib::termios as termios;
+
+        let termios_flags = wasi_ext_lib::tcgetattr(STDIN as wasi::Fd)
+                        .expect("Cannot obtain STDIN termios flags!");
+        let mut new_flags = termios_flags.clone();
+        new_flags.c_iflag |= termios::ICRNL;
+        new_flags.c_lflag |= termios::ICANON | termios::ECHO;
+
+        wasi_ext_lib::tcsetattr(
+            STDIN as wasi::Fd,
+            wasi_ext_lib::TcsetattrAction::TCSANOW,
+            &new_flags
+        )
+        .expect("Cannot set STDIN termios flags!");
+
+        let res  = wasi_ext_lib::spawn(path, args, env, background, redirects);
+
+        wasi_ext_lib::tcsetattr(
+            STDIN as wasi::Fd,
+            wasi_ext_lib::TcsetattrAction::TCSANOW,
+            &termios_flags
+        )
+        .expect("Cannot set STDIN termios flags!");
+
+        res
     }
     #[cfg(not(target_os = "wasi"))]
     match unsafe { nix::unistd::fork() } {
