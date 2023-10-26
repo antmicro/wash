@@ -796,7 +796,7 @@ impl Shell {
                 }
                 match c1 {
                     // enter
-                    10 => {
+                    10 | 13 => {
                         self.echo("\n");
                         self.cursor_position = 0;
                         *input = input.trim().to_string();
@@ -805,21 +805,9 @@ impl Shell {
                     // backspace
                     127 => {
                         if !input.is_empty() && self.cursor_position > 0 {
-                            self.echo(&format!("{}", 8 as char));
-                            self.echo(&" ".repeat(input.len() - self.cursor_position + 1));
+                            self.echo("\x1b[D\x1b[P");
                             input.remove(self.cursor_position - 1);
                             self.cursor_position -= 1;
-                            self.echo(
-                                &format!("{}", 8 as char)
-                                    .repeat(input.len() - self.cursor_position + 1),
-                            );
-                            self.echo(
-                                &input.chars().skip(self.cursor_position).collect::<String>(),
-                            );
-                            self.echo(
-                                &format!("{}", 8 as char)
-                                    .repeat(input.len() - self.cursor_position),
-                            );
                         }
                     }
                     // control codes
