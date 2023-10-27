@@ -592,11 +592,27 @@ impl Shell {
         self.handle_input(&fs::read_to_string(script_name.into()).unwrap())
     }
 
-    fn get_cursor_to_end(&mut self, input: &String) {
-        self.echo(&input.chars().skip(self.cursor_position).collect::<String>());
-        for _ in 0..input.len() {
-            self.echo(&format!("{} {}", 8 as char, 8 as char));
+    fn get_cursor_to_beginning(&mut self) {
+        if self.cursor_position > 0 {
+            // bring cursor to the beggining with `ESC[nD` escape sequence
+            self.echo(&format!("\x1b[{}D", self.cursor_position));
         }
+        self.cursor_position = 0;
+    }
+
+    fn get_cursor_to_end(&mut self, input: &String) {
+        let to_end = input.len() - self.cursor_position;
+        if input.len() - self.cursor_position > 0 {
+            // bring cursor to the end with `ESC[nC` escape sequence
+            self.echo(&format!("\x1b[{}C", to_end));
+        }
+        self.cursor_position = input.len();
+    }
+
+    fn erase_input(&mut self) {
+        // bring cursor to the beginning and clear line to the right with `ESC[0K`
+        self.get_cursor_to_beginning();
+        self.echo("\x1b[0K");
     }
 
     /// Builds a line from standard input.
@@ -714,9 +730,8 @@ impl Shell {
                                     } else if history_entry_to_display > 0 {
                                         history_entry_to_display -= 1;
                                     }
-                                    // bring cursor to the end so that clearing later starts from
-                                    // proper position
-                                    self.get_cursor_to_end(input);
+
+                                    self.erase_input();
                                     *input =
                                         self.history[history_entry_to_display as usize].clone();
                                     self.cursor_position = input.len();
@@ -727,9 +742,7 @@ impl Shell {
                             // down arrow
                             0x42 => {
                                 if history_entry_to_display != -1 {
-                                    // bring cursor to the end so that clearing later starts from
-                                    // proper position
-                                    self.get_cursor_to_end(input);
+                                    self.erase_input();
                                     if self.history.len() - 1 > (history_entry_to_display as usize)
                                     {
                                         history_entry_to_display += 1;
@@ -747,13 +760,8 @@ impl Shell {
                             // right arrow
                             0x43 => {
                                 if self.cursor_position < input.len() {
-                                    self.echo(
-                                        &input
-                                            .chars()
-                                            .nth(self.cursor_position)
-                                            .unwrap()
-                                            .to_string(),
-                                    );
+                                    // move cursor right with `ESC[C`
+                                    self.echo("\x1b[C");
                                     self.cursor_position += 1;
                                 }
                                 escaped = false;
@@ -761,23 +769,20 @@ impl Shell {
                             // left arrow
                             0x44 => {
                                 if self.cursor_position > 0 {
-                                    self.echo(&format!("{}", 8 as char));
+                                    // move cursor left with `ESC[D`
+                                    self.echo("\x1b[D");
                                     self.cursor_position -= 1;
                                 }
                                 escaped = false;
                             }
                             // end key
                             0x46 => {
-                                self.echo(
-                                    &input.chars().skip(self.cursor_position).collect::<String>(),
-                                );
-                                self.cursor_position = input.len();
+                                self.get_cursor_to_end(&input);
                                 escaped = false;
                             }
                             // home key
                             0x48 => {
-                                self.echo(&format!("{}", 8 as char).repeat(self.cursor_position));
-                                self.cursor_position = 0;
+                                self.get_cursor_to_beginning();
                                 escaped = false;
                             }
                             _ => {
