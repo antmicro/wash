@@ -659,7 +659,7 @@ impl Shell {
                                             history_entry_to_display = 0;
                                             // bring cursor to the end so that clearing later starts from
                                             // proper position
-                                            self.get_cursor_to_end(input);
+                                            self.erase_input();
                                             *input = self.history[0].clone();
                                             self.cursor_position = input.len();
                                             self.echo(input);
@@ -671,7 +671,7 @@ impl Shell {
                                         if history_entry_to_display != -1 {
                                             // bring cursor to the end so that clearing later starts from
                                             // proper position
-                                            self.get_cursor_to_end(input);
+                                            self.erase_input();
                                             *input = input_stash.clone();
                                             history_entry_to_display = -1;
                                             self.cursor_position = input.len();
