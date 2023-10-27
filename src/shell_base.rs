@@ -534,7 +534,7 @@ impl Shell {
             last_exit_status: EXIT_SUCCESS,
             last_job_pid: None,
             cursor_position: 0,
-            insert_mode: false,
+            insert_mode: true,
 
             reader: InternalReader::OnlyStdin,
         }
@@ -624,8 +624,8 @@ impl Shell {
         let mut c1;
         let mut escaped = false;
         let mut history_entry_to_display: i32 = -1;
-        if self.insert_mode {
-            self.insert_mode = false;
+        if !self.insert_mode {
+            self.insert_mode = true;
         }
 
         loop {
@@ -824,12 +824,13 @@ impl Shell {
                     }
                     // regular characters
                     _ => {
-                        if !self.insert_mode {
+                        if self.insert_mode {
+                            // in insert mode, when cursor is in the middle, new character expand CLI
+                            // instead of replacing charcter under cursor
                             input.insert(self.cursor_position, c1 as char);
                         } else {
-                            // in insert mode, when cursor is in the middle, chars are replaced
-                            // instead of being put in the middle while moving next characters further
                             if self.cursor_position != input.len() {
+                                self.echo("\x1b[P");
                                 input.replace_range(
                                     self.cursor_position..self.cursor_position + 1,
                                     std::str::from_utf8(&[c1]).unwrap(),
@@ -840,11 +841,7 @@ impl Shell {
                             }
                         }
                         // echo
-                        self.echo(&format!(
-                            "{}{}",
-                            input.chars().skip(self.cursor_position).collect::<String>(),
-                            format!("{}", 8 as char).repeat(input.len() - self.cursor_position - 1),
-                        ));
+                        self.echo(std::str::from_utf8(&[c1]).unwrap());
                         self.cursor_position += 1;
                     }
                 }
