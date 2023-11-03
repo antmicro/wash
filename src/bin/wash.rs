@@ -162,20 +162,16 @@ fn main() {
                 shell.run_interpreter()
             }
             Ok(true) => {
-                let termios_flags;
+                let termios_flags = Shell::enable_interprter_mode()
+                    .expect("Cannot set STDIN termios flags!");
                 #[cfg(target_os = "wasi")] {
-
                     shell
                         .register_sigint()
                         .expect("Cannot register InternalEventSource object!");
-
-                    termios_flags = Shell::enable_interprter_mode()
-                        .expect("Cannot set STDIN termios flags!");
                 }
 
                 let result = shell.run_interpreter();
 
-                #[cfg(target_os = "wasi")]
                 Shell::set_terminal_mode(&termios_flags)
                     .expect("Cannot set STDIN termios flags!");
 

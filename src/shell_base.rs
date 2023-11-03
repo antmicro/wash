@@ -58,6 +58,13 @@ enum HistoryExpansion {
 #[cfg(target_os = "wasi")]
 pub type Redirect = wasi_ext_lib::Redirect;
 
+#[cfg(target_os = "wasi")]
+pub(crate) type Termios = termios::termios;
+#[cfg(not(target_os = "wasi"))]
+use nix::sys::termios;
+#[cfg(not(target_os = "wasi"))]
+pub(crate) type Termios = termios::Termios;
+
 #[cfg(not(target_os = "wasi"))]
 #[derive(Debug)]
 pub enum Redirect {
@@ -247,34 +254,14 @@ pub fn spawn(
     background: bool,
     redirects: &[Redirect],
 ) -> Result<(i32, i32), i32> {
+    let termios_flags = Shell::restore_default_mode()
+            .expect("Cannot obtain STDIN termios flags!");
+
     #[cfg(target_os = "wasi")]
-    {
-        let termios_flags = wasi_ext_lib::tcgetattr(STDIN as wasi::Fd)
-                        .expect("Cannot obtain STDIN termios flags!");
-        let mut new_flags = termios_flags.clone();
-        new_flags.c_iflag |= termios::ICRNL;
-        new_flags.c_lflag |= termios::ICANON | termios::ECHO;
+    let res = wasi_ext_lib::spawn(path, args, env, background, redirects);
 
-        wasi_ext_lib::tcsetattr(
-            STDIN as wasi::Fd,
-            wasi_ext_lib::TcsetattrAction::TCSANOW,
-            &new_flags
-        )
-        .expect("Cannot set STDIN termios flags!");
-
-        let res  = wasi_ext_lib::spawn(path, args, env, background, redirects);
-
-        wasi_ext_lib::tcsetattr(
-            STDIN as wasi::Fd,
-            wasi_ext_lib::TcsetattrAction::TCSANOW,
-            &termios_flags
-        )
-        .expect("Cannot set STDIN termios flags!");
-
-        res
-    }
-    #[cfg(not(target_os = "wasi"))]
-    match unsafe { nix::unistd::fork() } {
+    #[cfg(not(target_os = "wasi"))] 
+    let res = match unsafe { nix::unistd::fork() } {
         Ok(nix::unistd::ForkResult::Parent { child }) => {
             if !background {
                 Ok((wait_for_child(child), i32::from(child)))
@@ -325,7 +312,11 @@ pub fn spawn(
             eprintln!("{}: {}", env!("CARGO_PKG_NAME"), err);
             Err(EXIT_FAILURE)
         }
-    }
+    };
+
+    Shell::set_terminal_mode(&termios_flags).expect("Cannot set STDIN termios flags!");
+
+    res
 }
 
 #[cfg(not(target_os = "wasi"))]
@@ -1144,53 +1135,94 @@ impl Shell {
         Ok(self.last_exit_status)
     }
 
-    fn get_termios(fd: Fd) -> Result<termios::termios, Error> {
+    fn get_termios(fd: Fd) -> Result<Termios, Error> {
+        #[cfg(target_os = "wasi")]
         match wasi_ext_lib::tcgetattr(fd) {
             Ok(mode) => Ok(mode),
             Err(e) => return Err(Error::from_raw_os_error(e))
         }
+
+        #[cfg(not(target_os = "wasi"))]
+        match termios::tcgetattr(fd) {
+            Ok(mode) => Ok(mode),
+            Err(e) => return Err(e.into())
+        }
+
     }
 
-    fn set_termios(fd: Fd, mode: &termios::termios) -> Result<(), Error> {
+    fn set_termios(fd: Fd, mode: &Termios) -> Result<(), Error> {
+        #[cfg(target_os = "wasi")]
         match wasi_ext_lib::tcsetattr(
             fd,
             wasi_ext_lib::TcsetattrAction::TCSANOW,
             &mode
         ) {
             Ok(()) => Ok(()),
-            Err(e) => Err(Error::from_raw_os_error(e))
+            Err(e) => Err(Error::from_raw_os_error(e.into()))
+        }
+
+        #[cfg(not(target_os = "wasi"))]
+        match termios::tcsetattr(
+            fd,
+            termios::SetArg::TCSANOW,
+            &mode
+        ) {
+            Ok(()) => Ok(()),
+            Err(e) => Err(e.into())
         }
     }
 
-    pub fn enable_interprter_mode() -> Result<termios::termios, Error> {
+    pub fn enable_interprter_mode() -> Result<Termios, Error> {
         let original_mode = Shell::get_termios(STDIN)?;
 
         let mut new_mode = original_mode.clone();
 
-        new_mode.c_iflag |= termios::IXON | termios::IXOFF;
-        new_mode.c_iflag &= !termios::ICRNL;
-        new_mode.c_oflag |= termios::OPOST | termios::ONLCR;
-        new_mode.c_cflag |= termios::CS8 | termios::CREAD;
-        new_mode.c_lflag |= termios::ISIG | termios::ECHOE | termios::ECHOK | termios::IEXTEN;
-        new_mode.c_lflag &= !(termios::ICANON | termios::ECHO);
+        #[cfg(target_os = "wasi")] {
+            new_mode.c_iflag |= termios::IXON | termios::IXOFF;
+            new_mode.c_iflag &= !termios::ICRNL;
+            new_mode.c_oflag |= termios::OPOST | termios::ONLCR;
+            new_mode.c_cflag |= termios::CS8 | termios::CREAD;
+            new_mode.c_lflag |= termios::ISIG | termios::ECHOE | termios::ECHOK | termios::IEXTEN;
+            new_mode.c_lflag &= !(termios::ICANON | termios::ECHO);
+        }
+
+        #[cfg(not(target_os = "wasi"))] {
+            new_mode.input_flags |= termios::InputFlags::IXON | termios::InputFlags::IXOFF;
+            new_mode.input_flags &= !termios::InputFlags::ICRNL;
+            new_mode.output_flags |= termios::OutputFlags::OPOST | termios::OutputFlags::ONLCR;
+            new_mode.control_flags |= termios::ControlFlags::CS8 | termios::ControlFlags::CREAD;
+            new_mode.local_flags |= 
+                termios::LocalFlags::ISIG |
+                termios::LocalFlags::ECHOE |
+                termios::LocalFlags::ECHOK |
+                termios::LocalFlags::IEXTEN;
+            new_mode.local_flags &= !(termios::LocalFlags::ICANON | termios::LocalFlags::ECHO);
+        }
 
         Shell::set_termios(STDIN, &new_mode)?;
         Ok(original_mode)
     }
 
-    pub fn restore_default_mode() -> Result<termios::termios, Error> {
+    pub fn restore_default_mode() -> Result<Termios, Error> {
         let original_mode = Shell::get_termios(STDIN)?;
 
         let mut new_mode = original_mode.clone();
 
-        new_mode.c_iflag |= termios::ICRNL;
-        new_mode.c_lflag |= termios::ICANON | termios::ECHO;
+        #[cfg(target_os = "wasi")] {
+            new_mode.c_iflag |= termios::ICRNL;
+            new_mode.c_lflag |= termios::ICANON | termios::ECHO;
+        }
+
+        #[cfg(not(target_os = "wasi"))] {
+            new_mode.input_flags |= termios::InputFlags::ICRNL;
+            new_mode.local_flags |= termios::LocalFlags::ICANON | termios::LocalFlags::ECHO;
+        }
 
         Shell::set_termios(STDIN, &new_mode)?;
         Ok(original_mode)
     }
 
-    pub fn set_terminal_mode(mode: &termios::termios) -> Result<(), Error> {
+    pub fn set_terminal_mode(mode: &Termios) -> Result<(), Error> {
         Shell::set_termios(STDIN, mode)
     }
 
