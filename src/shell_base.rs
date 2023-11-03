@@ -14,7 +14,7 @@ use std::env;
 use std::fs;
 use std::fs::{File, OpenOptions};
 use std::io;
-use std::io::ErrorKind;
+use std::io::{Error, ErrorKind};
 use std::io::{BufRead, BufReader, Read, Write};
 #[cfg(target_os = "wasi")]
 use std::mem;
@@ -25,6 +25,9 @@ use std::os::wasi::io::{AsRawFd, FromRawFd};
 use std::path::{Path, PathBuf};
 #[cfg(target_os = "wasi")]
 use wasi;
+
+#[cfg(target_os = "wasi")]
+use wasi_ext_lib::termios;
 
 use crate::internals::INTERNALS_MAP;
 use crate::interpreter::InputInterpreter;
@@ -246,8 +249,6 @@ pub fn spawn(
 ) -> Result<(i32, i32), i32> {
     #[cfg(target_os = "wasi")]
     {
-        use wasi_ext_lib::termios as termios;
-
         let termios_flags = wasi_ext_lib::tcgetattr(STDIN as wasi::Fd)
                         .expect("Cannot obtain STDIN termios flags!");
         let mut new_flags = termios_flags.clone();
@@ -1141,6 +1142,56 @@ impl Shell {
             EXIT_CRITICAL_FAILURE
         };
         Ok(self.last_exit_status)
+    }
+
+    fn get_termios(fd: Fd) -> Result<termios::termios, Error> {
+        match wasi_ext_lib::tcgetattr(fd) {
+            Ok(mode) => Ok(mode),
+            Err(e) => return Err(Error::from_raw_os_error(e))
+        }
+    }
+
+    fn set_termios(fd: Fd, mode: &termios::termios) -> Result<(), Error> {
+        match wasi_ext_lib::tcsetattr(
+            fd,
+            wasi_ext_lib::TcsetattrAction::TCSANOW,
+            &mode
+        ) {
+            Ok(()) => Ok(()),
+            Err(e) => Err(Error::from_raw_os_error(e))
+        }
+    }
+
+    pub fn enable_interprter_mode() -> Result<termios::termios, Error> {
+        let original_mode = Shell::get_termios(STDIN)?;
+
+        let mut new_mode = original_mode.clone();
+
+        new_mode.c_iflag |= termios::IXON | termios::IXOFF;
+        new_mode.c_iflag &= !termios::ICRNL;
+        new_mode.c_oflag |= termios::OPOST | termios::ONLCR;
+        new_mode.c_cflag |= termios::CS8 | termios::CREAD;
+        new_mode.c_lflag |= termios::ISIG | termios::ECHOE | termios::ECHOK | termios::IEXTEN;
+        new_mode.c_lflag &= !(termios::ICANON | termios::ECHO);
+
+        Shell::set_termios(STDIN, &new_mode)?;
+        Ok(original_mode)
+    }
+
+    pub fn restore_default_mode() -> Result<termios::termios, Error> {
+        let original_mode = Shell::get_termios(STDIN)?;
+
+        let mut new_mode = original_mode.clone();
+
+        new_mode.c_iflag |= termios::ICRNL;
+        new_mode.c_lflag |= termios::ICANON | termios::ECHO;
+
+        Shell::set_termios(STDIN, &new_mode)?;
+        Ok(original_mode)
+    }
+
+    pub fn set_terminal_mode(mode: &termios::termios) -> Result<(), Error> {
+        Shell::set_termios(STDIN, mode)
     }
 
     #[cfg(target_os = "wasi")]

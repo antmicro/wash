@@ -164,40 +164,20 @@ fn main() {
             Ok(true) => {
                 let termios_flags;
                 #[cfg(target_os = "wasi")] {
-                    use wasi_ext_lib::termios as termios;
 
                     shell
                         .register_sigint()
                         .expect("Cannot register InternalEventSource object!");
 
-                    termios_flags = wasi_ext_lib::tcgetattr(STDIN as wasi::Fd)
-                        .expect("Cannot obtain STDIN termios flags!");
-                    let mut new_flags = termios_flags.clone();
-
-                    new_flags.c_iflag |= termios::IXON | termios::IXOFF;
-                    new_flags.c_iflag &= !termios::ICRNL;
-                    new_flags.c_oflag |= termios::OPOST | termios::ONLCR;
-                    new_flags.c_cflag |= termios::CS8 | termios::CREAD;
-                    new_flags.c_lflag |= termios::ISIG | termios::ECHOE | termios::ECHOK | termios::IEXTEN;
-                    new_flags.c_lflag &= !(termios::ICANON | termios::ECHO);
-
-                    wasi_ext_lib::tcsetattr(
-                        STDIN as wasi::Fd,
-                        wasi_ext_lib::TcsetattrAction::TCSANOW,
-                        &new_flags
-                    )
-                    .expect("Cannot set STDIN termios flags!");
+                    termios_flags = Shell::enable_interprter_mode()
+                        .expect("Cannot set STDIN termios flags!");
                 }
 
                 let result = shell.run_interpreter();
 
                 #[cfg(target_os = "wasi")]
-                wasi_ext_lib::tcsetattr(
-                    STDIN as wasi::Fd,
-                    wasi_ext_lib::TcsetattrAction::TCSANOW,
-                    &termios_flags
-                )
-                .expect("Cannot set STDIN termios flags!");
+                Shell::set_terminal_mode(&termios_flags)
+                    .expect("Cannot set STDIN termios flags!");
 
                 result
             }
