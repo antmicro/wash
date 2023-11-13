@@ -99,7 +99,7 @@ fn main() {
     let matches = cli.get_matches_from(wash_args);
 
     let pwd;
-    let should_echo;
+    let should_echo = true;
 
     #[cfg(target_os = "wasi")]
     {
@@ -114,7 +114,6 @@ fn main() {
                 &pwd
             }
         });
-        should_echo = true;
     }
     #[cfg(not(target_os = "wasi"))]
     {
@@ -123,7 +122,6 @@ fn main() {
         } else {
             pwd = String::from("/");
         }
-        should_echo = false;
     }
 
     if env::var("PWD").is_err() {
