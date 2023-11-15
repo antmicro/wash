@@ -160,7 +160,7 @@ fn main() {
                 shell.run_interpreter()
             }
             Ok(true) => {
-                let termios_flags = Shell::enable_interprter_mode()
+                shell.enable_interprter_mode()
                     .expect("Cannot set STDIN termios flags!");
                 #[cfg(target_os = "wasi")] {
                     shell
@@ -170,7 +170,7 @@ fn main() {
 
                 let result = shell.run_interpreter();
 
-                Shell::set_terminal_mode(&termios_flags)
+                shell.restore_default_mode()
                     .expect("Cannot set STDIN termios flags!");
 
                 result
