@@ -13,8 +13,8 @@ use std::process;
 
 use clap::{Arg, ArgAction, Command};
 
-use wash::Shell;
 use wash::shell_base::{is_fd_tty, Fd};
+use wash::Shell;
 
 const STDIN: Fd = 0;
 
@@ -148,9 +148,11 @@ fn main() {
                 shell.run_interpreter()
             }
             Ok(true) => {
-                shell.enable_interprter_mode()
+                shell
+                    .enable_interprter_mode()
                     .expect("Cannot set STDIN termios flags!");
-                #[cfg(target_os = "wasi")] {
+                #[cfg(target_os = "wasi")]
+                {
                     shell
                         .register_sigint()
                         .expect("Cannot register InternalEventSource object!");
@@ -158,7 +160,8 @@ fn main() {
 
                 let result = shell.run_interpreter();
 
-                shell.restore_default_mode()
+                shell
+                    .restore_default_mode()
                     .expect("Cannot set STDIN termios flags!");
 
                 result

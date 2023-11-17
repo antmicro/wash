@@ -14,8 +14,8 @@ use std::env;
 use std::fs;
 use std::fs::{File, OpenOptions};
 use std::io;
-use std::io::{Error, ErrorKind};
 use std::io::{BufRead, BufReader, Read, Write};
+use std::io::{Error, ErrorKind};
 #[cfg(target_os = "wasi")]
 use std::mem;
 #[cfg(not(target_os = "wasi"))]
@@ -268,11 +268,12 @@ pub fn spawn(
     background: bool,
     redirects: &[Redirect],
 ) -> Result<(i32, i32), i32> {
-    #[cfg(target_os = "wasi")] {
+    #[cfg(target_os = "wasi")]
+    {
         wasi_ext_lib::spawn(path, args, env, background, redirects)
     }
 
-    #[cfg(not(target_os = "wasi"))] 
+    #[cfg(not(target_os = "wasi"))]
     match unsafe { nix::unistd::fork() } {
         Ok(nix::unistd::ForkResult::Parent { child }) => {
             if !background {
@@ -780,7 +781,7 @@ impl Shell {
                             }
                             // end key
                             0x46 => {
-                                self.get_cursor_to_end(&input);
+                                self.get_cursor_to_end(input);
                                 escaped = false;
                             }
                             // home key
@@ -831,17 +832,15 @@ impl Shell {
                             // in insert mode, when cursor is in the middle, new character expand CLI
                             // instead of replacing charcter under cursor
                             input.insert(self.cursor_position, c1 as char);
+                        } else if self.cursor_position != input.len() {
+                            self.echo("\x1b[P");
+                            input.replace_range(
+                                self.cursor_position..self.cursor_position + 1,
+                                std::str::from_utf8(&[c1]).unwrap(),
+                            );
                         } else {
-                            if self.cursor_position != input.len() {
-                                self.echo("\x1b[P");
-                                input.replace_range(
-                                    self.cursor_position..self.cursor_position + 1,
-                                    std::str::from_utf8(&[c1]).unwrap(),
-                                );
-                            } else {
-                                // if cursor is at the end, chars are input regularly
-                                input.push(c1 as char);
-                            }
+                            // if cursor is at the end, chars are input regularly
+                            input.push(c1 as char);
                         }
                         // echo
                         self.echo(std::str::from_utf8(&[c1]).unwrap());
@@ -1153,51 +1152,44 @@ impl Shell {
         #[cfg(target_os = "wasi")]
         match wasi_ext_lib::tcgetattr(fd) {
             Ok(mode) => Ok(mode),
-            Err(e) => return Err(Error::from_raw_os_error(e))
+            Err(e) => Err(Error::from_raw_os_error(e)),
         }
 
         #[cfg(not(target_os = "wasi"))]
         match termios::tcgetattr(fd) {
             Ok(mode) => Ok(mode),
-            Err(e) => return Err(e.into())
+            Err(e) => Err(e.into()),
         }
-
     }
 
     fn set_termios(fd: Fd, mode: &Termios) -> Result<(), Error> {
         #[cfg(target_os = "wasi")]
-        match wasi_ext_lib::tcsetattr(
-            fd,
-            wasi_ext_lib::TcsetattrAction::TCSANOW,
-            &mode
-        ) {
+        match wasi_ext_lib::tcsetattr(fd, wasi_ext_lib::TcsetattrAction::TCSANOW, mode) {
             Ok(()) => Ok(()),
-            Err(e) => Err(Error::from_raw_os_error(e.into()))
+            Err(e) => Err(Error::from_raw_os_error(e)),
         }
 
         #[cfg(not(target_os = "wasi"))]
-        match termios::tcsetattr(
-            fd,
-            termios::SetArg::TCSANOW,
-            &mode
-        ) {
+        match termios::tcsetattr(fd, termios::SetArg::TCSANOW, mode) {
             Ok(()) => Ok(()),
-            Err(e) => Err(e.into())
+            Err(e) => Err(e.into()),
         }
     }
 
     pub fn enable_interprter_mode(&mut self) -> Result<(), Error> {
         let mut termios_mode = Shell::get_termios(STDIN)?;
-        self.termios_mode = Some(termios_mode.clone());
+        self.termios_mode = Some(termios_mode);
 
         // check echo is set, if set then enable internal echo but disable termios echo
-        #[cfg(target_os = "wasi")] {
+        #[cfg(target_os = "wasi")]
+        {
             self.should_echo = (termios_mode.c_lflag & termios::ECHO) != 0;
             termios_mode.c_lflag |= termios::ISIG;
             termios_mode.c_lflag &= !(termios::ICANON | termios::ECHO);
         }
 
-        #[cfg(not(target_os = "wasi"))] {
+        #[cfg(not(target_os = "wasi"))]
+        {
             self.should_echo = termios_mode.local_flags.contains(termios::LocalFlags::ECHO);
             termios_mode.local_flags |= termios::LocalFlags::ISIG;
             termios_mode.local_flags &= !(termios::LocalFlags::ICANON | termios::LocalFlags::ECHO);
@@ -1209,7 +1201,7 @@ impl Shell {
 
     pub fn restore_default_mode(&self) -> Result<(), Error> {
         if let Some(termios_mode) = &self.termios_mode {
-            Shell::set_termios(STDIN, &termios_mode)?;
+            Shell::set_termios(STDIN, termios_mode)?;
         }
 
         Ok(())
