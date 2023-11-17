@@ -78,6 +78,20 @@ pub enum Redirect {
     Close(Fd),
 }
 
+pub fn is_fd_tty(fd: Fd) -> Result<bool, Error> {
+    #[cfg(target_os = "wasi")]
+    match wasi_ext_lib::isatty(fd as i32) {
+        Err(e) => Err(Error::from_raw_os_error(e)),
+        Ok(is) => Ok(is),
+    }
+
+    #[cfg(not(target_os = "wasi"))]
+    match nix::unistd::isatty(fd) {
+        Err(e) => Err(e.into()),
+        Ok(is) => Ok(is),
+    }
+}
+
 pub fn preprocess_redirects<'a>(
     redirects: &'a [Redirect],
     output_device: &mut OutputDevice<'a>,
@@ -1014,7 +1028,9 @@ impl Shell {
         }
 
         // restore termios
-        self.restore_default_mode()?;
+        if let Ok(true) = is_fd_tty(STDIN) {
+            self.restore_default_mode()?;
+        }
 
         let result: Result<i32, Report> = if let Some(internal) = INTERNALS_MAP.get(command) {
             internal(self, args, &mut output_device)
@@ -1118,7 +1134,10 @@ impl Shell {
                 }
             }
         };
-        self.enable_interprter_mode()?;
+
+        if let Ok(true) = is_fd_tty(STDIN) {
+            self.enable_interprter_mode()?;
+        }
 
         output_device.flush()?;
 

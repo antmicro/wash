@@ -8,27 +8,15 @@ use std::collections::VecDeque;
 use std::env;
 use std::io;
 use std::io::Read;
-use std::os::raw::c_int;
 use std::path::PathBuf;
 use std::process;
 
 use clap::{Arg, ArgAction, Command};
 
 use wash::Shell;
+use wash::shell_base::{is_fd_tty, Fd};
 
-#[cfg(not(target_os = "wasi"))]
-extern "C" {
-    fn isatty(fd: c_int) -> c_int;
-}
-
-const STDIN: c_int = 0;
-
-fn is_fd_tty(fd: i32) -> Result<bool, i32> {
-    #[cfg(not(target_os = "wasi"))]
-    return Ok(unsafe { isatty(fd) } == 1);
-    #[cfg(target_os = "wasi")]
-    return wasi_ext_lib::isatty(fd);
-}
+const STDIN: Fd = 0;
 
 fn main() {
     let name = {
