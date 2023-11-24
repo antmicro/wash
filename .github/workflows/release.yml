@@ -1,0 +1,29 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - '*'
+
+jobs:
+  build-wash:
+    name: Build wash
+    uses: ./.github/workflows/build.yml
+
+  release-wash:
+    name: Release
+    needs: [build-wash]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download artifact
+        uses: actions/download-artifact@v3
+        with:
+          name: wash
+          path: ./
+      - name: Release
+        uses: marvinpinto/action-automatic-releases@919008cf3f741b179569b7a6fb4d8860689ab7f0
+        with:
+          repo_token: ${{ secrets.GITHUB_TOKEN }}
+          prerelase: false
+          files: |
+            wash.wasm

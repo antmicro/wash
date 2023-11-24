@@ -1,6 +1,11 @@
 name: build library
 
-on: [push, pull_request]
+on:
+  push:
+    tags-ignore:
+      - '**'
+  pull_request:
+  workflow_call:
 
 jobs:
   build-library:
@@ -63,3 +68,8 @@ jobs:
           source $HOME/.cargo/env
           export CC="${WASI_SDK_PATH}/bin/clang --sysroot=${WASI_SDK_PATH}/share/wasi-sysroot"
           cargo +stage2 build --target wasm32-wasi --release
+      - name: Upload artifact
+        uses: actions/upload-artifact@v3
+        with:
+          name: wash
+          path: ./target/wasm32-wasi/release/wash.wasm
