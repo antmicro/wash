@@ -910,7 +910,7 @@ impl Shell {
         #[cfg(target_os = "wasi")]
         {
             // TODO: see https://github.com/WebAssembly/wasi-filesystem/issues/24
-            _ = wasi_ext_lib::chdir(&if let Ok(p) = wasi_ext_lib::getcwd() {
+            _ = wasi_ext_lib::chdir(if let Ok(p) = wasi_ext_lib::getcwd() {
                 p
             } else {
                 String::from("/")
