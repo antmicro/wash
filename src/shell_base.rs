@@ -1131,7 +1131,7 @@ impl Shell {
         };
 
         if let Ok(true) = is_fd_tty(STDIN) {
-            self.enable_interprter_mode()?;
+            self.enable_interpreter_mode()?;
         }
 
         output_device.flush()?;
@@ -1172,13 +1172,13 @@ impl Shell {
         }
     }
 
-    pub fn enable_interprter_mode(&mut self) -> Result<(), Error> {
+    pub fn enable_interpreter_mode(&mut self) -> Result<(), Error> {
         let mut termios_mode = Shell::get_termios(STDIN)?;
-        self.termios_mode = Some(termios_mode);
-
+        
         // check echo is set, if set then enable internal echo but disable termios echo
         #[cfg(target_os = "wasi")]
         {
+            self.termios_mode = Some(termios_mode);
             self.should_echo = (termios_mode.c_lflag & termios::ECHO) != 0;
             termios_mode.c_lflag |= termios::ISIG;
             termios_mode.c_lflag &= !(termios::ICANON | termios::ECHO);
@@ -1186,6 +1186,7 @@ impl Shell {
 
         #[cfg(not(target_os = "wasi"))]
         {
+            self.termios_mode = Some(termios_mode.clone());
             self.should_echo = termios_mode.local_flags.contains(termios::LocalFlags::ECHO);
             termios_mode.local_flags |= termios::LocalFlags::ISIG;
             termios_mode.local_flags &= !(termios::LocalFlags::ICANON | termios::LocalFlags::ECHO);

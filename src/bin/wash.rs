@@ -149,7 +149,7 @@ fn main() {
             }
             Ok(true) => {
                 shell
-                    .enable_interprter_mode()
+                    .enable_interpreter_mode()
                     .expect("Cannot set STDIN termios flags!");
                 #[cfg(target_os = "wasi")]
                 {
