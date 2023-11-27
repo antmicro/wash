@@ -661,8 +661,6 @@ impl Shell {
                                                 input_stash = input.clone();
                                             }
                                             history_entry_to_display = 0;
-                                            // bring cursor to the end so that clearing later starts from
-                                            // proper position
                                             self.erase_input();
                                             *input = self.history[0].clone();
                                             self.cursor_position = input.len();
@@ -673,8 +671,6 @@ impl Shell {
                                     // PageDown
                                     [0x36, 0x7e] => {
                                         if history_entry_to_display != -1 {
-                                            // bring cursor to the end so that clearing later starts from
-                                            // proper position
                                             self.erase_input();
                                             *input = input_stash.clone();
                                             history_entry_to_display = -1;
