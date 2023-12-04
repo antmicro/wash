@@ -824,22 +824,29 @@ impl Shell {
                     }
                     // regular characters
                     _ => {
-                        if self.insert_mode {
+                        if self.cursor_position == input.len() {
+                            input.push(c1 as char);
+                            self.echo(std::str::from_utf8(&[c1]).unwrap());
+                        } else if self.insert_mode {
                             // in insert mode, when cursor is in the middle, new character expand CLI
                             // instead of replacing charcter under cursor
                             input.insert(self.cursor_position, c1 as char);
-                        } else if self.cursor_position != input.len() {
-                            self.echo("\x1b[P");
+
+                            // for wasi target, we assume that hterm has enabled insert mode
+                            #[cfg(target_os = "wasi")]
+                            self.echo(std::str::from_utf8(&[c1]).unwrap());
+
+                            #[cfg(not(target_os = "wasi"))]
+                            self.echo(&format!("\x1b[@{}", std::str::from_utf8(&[c1]).unwrap()));
+                        } else {
                             input.replace_range(
                                 self.cursor_position..self.cursor_position + 1,
                                 std::str::from_utf8(&[c1]).unwrap(),
                             );
-                        } else {
-                            // if cursor is at the end, chars are input regularly
-                            input.push(c1 as char);
+
+                            self.echo(std::str::from_utf8(&[c1]).unwrap());
                         }
-                        // echo
-                        self.echo(std::str::from_utf8(&[c1]).unwrap());
+
                         self.cursor_position += 1;
                     }
                 }
@@ -1174,7 +1181,7 @@ impl Shell {
 
     pub fn enable_interpreter_mode(&mut self) -> Result<(), Error> {
         let mut termios_mode = Shell::get_termios(STDIN)?;
-        
+
         // check echo is set, if set then enable internal echo but disable termios echo
         #[cfg(target_os = "wasi")]
         {
