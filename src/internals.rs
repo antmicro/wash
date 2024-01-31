@@ -225,7 +225,7 @@ fn source(
     args: &mut [String],
     output_device: &mut OutputDevice,
 ) -> Result<i32, Report> {
-    if let Some(filename) = args.get(0) {
+    if let Some(filename) = args.first() {
         shell.run_script(filename).unwrap();
         Ok(EXIT_SUCCESS)
     } else {
@@ -265,7 +265,7 @@ fn shift(
     if args.len() > 1 {
         output_device.eprintln("shift: too many arguments");
         Ok(EXIT_FAILURE)
-    } else if let Some(n) = &args.get(0) {
+    } else if let Some(n) = &args.first() {
         if let Ok(m) = n.parse::<i32>() {
             if m < 0 {
                 output_device.eprintln(&format!("shift: {m}: shift count out of range"));
