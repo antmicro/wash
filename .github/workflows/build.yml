@@ -2,7 +2,7 @@ name: build library
 
 on:
   push:
-    tags-ignore:
+    branches:
       - '**'
   pull_request:
   workflow_call:
