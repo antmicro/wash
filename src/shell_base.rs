@@ -709,14 +709,12 @@ impl Shell {
                                         escaped = false;
                                     }
                                     [0x33, 0x3b] => {
-                                        println!("TODO: SHIFT + DELETE");
                                         let mut c4 = [0; 2];
                                         // TWO MORE! TODO: improve!
                                         io::stdin().read_exact(&mut c4).unwrap();
                                         escaped = false;
                                     }
                                     _ => {
-                                        println!("TODO: [ + 0x{:02x} + 0x{:02x}", c2, c3);
                                         escaped = false;
                                     }
                                 }
@@ -786,7 +784,6 @@ impl Shell {
                                 escaped = false;
                             }
                             _ => {
-                                println!("WE HAVE UNKNOWN CONTROL CODE '[' + {}", c2);
                                 escaped = false;
                             }
                         }
