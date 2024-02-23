@@ -26,6 +26,8 @@ use std::path::{Path, PathBuf};
 #[cfg(target_os = "wasi")]
 use wasi;
 
+use vte::{Params, Parser, Perform};
+
 #[cfg(target_os = "wasi")]
 use wasi_ext_lib::termios;
 
@@ -504,12 +506,135 @@ pub struct Shell {
     pub history: Vec<String>,
 
     history_path: PathBuf,
+    input: String,
     should_echo: bool,
     cursor_position: usize,
     insert_mode: bool,
     termios_mode: Option<Termios>,
 
     reader: InternalReader,
+}
+
+impl Perform for Shell {
+    fn print(&mut self, c: char) {
+        // regular characters
+        if self.cursor_position == self.input.len() {
+            self.input.push(c);
+            self.echo(&c.to_string());
+        } else if self.insert_mode {
+            // in insert mode, when cursor is in the middle, new character expand CLI
+            // instead of replacing charcter under cursor
+            self.input.insert(self.cursor_position, c);
+
+            // for wasi target, we assume that hterm has enabled insert mode
+            #[cfg(target_os = "wasi")]
+            self.echo(&c.to_string());
+
+            #[cfg(not(target_os = "wasi"))]
+            self.echo(&format!("\x1b[@{}", c));
+        } else {
+            self.input.replace_range(
+                self.cursor_position..self.cursor_position + 1,
+                &c.to_string(),
+            );
+
+            self.echo(&c.to_string());
+        }
+
+        self.cursor_position += 1;
+    }
+
+    fn execute(&mut self, byte: u8) {
+        // C0 and C1 control functions
+        match byte {
+            // enter
+            0x10 | 0x13 => {
+                self.echo("\n");
+                self.cursor_position = 0;
+                self.input = self.input.trim().to_string();
+            }
+            // backspace
+            127 => {
+                if !self.input.is_empty() && self.cursor_position > 0 {
+                    self.echo("\x1b[D\x1b[P");
+                    self.input.remove(self.cursor_position - 1);
+                    self.cursor_position -= 1;
+                }
+            }
+            _ => {/* ignore for now */}
+        }
+    }
+
+    fn hook(&mut self, _params: &Params, _intermediates: &[u8], _ignore: bool, _c: char) {
+        /* ignore for now */
+    }
+
+    fn put(&mut self, _byte: u8) {
+        /* ignore for now */
+    }
+
+    fn unhook(&mut self) {
+        /* ignore for now */
+    }
+
+    fn osc_dispatch(&mut self, _params: &[&[u8]], _bell_terminated: bool) {
+        /* ignore for now */
+    }
+
+    fn csi_dispatch(&mut self, params: &Params, _intermediates: &[u8], _ignore: bool, c: char) {
+        if params.len() == 1 {
+            let param = params.iter().next().unwrap();
+            match (param[0], c) {
+                // UpArrow
+                (_, 'A') => {
+
+                }
+                // DownArrow
+                (_, 'B') => {
+
+                }
+                // RightArrow
+                (_, 'C') => {
+
+                }
+                // LeftArrow
+                (_, 'D') => {
+
+                }
+                // End
+                (_, 'F') => {
+
+                }
+                // Home
+                (_, 'H') => {
+
+                }
+                // PageUp
+                (5, '~') => {
+
+                }
+                // PageDown
+                (6, '~') => {
+
+                }
+                // Insert
+                (7, '~') => {
+
+                }
+                // Del
+                (8, '~') => {
+
+                }
+                (_, _) => {
+
+                }
+            }
+        }
+    }
+
+    fn esc_dispatch(&mut self, _intermediates: &[u8], _ignore: bool, _byte: u8) {
+        /* ignore for now */
+    }
 }
 
 impl Shell {
@@ -532,6 +657,7 @@ impl Shell {
                     env!("CARGO_PKG_NAME")
                 )
             }),
+            input: String::new(),
             vars: HashMap::new(),
             last_exit_status: EXIT_SUCCESS,
             last_job_pid: None,
