@@ -10,14 +10,14 @@ use std::io::Write;
 use vte::{Params, Perform};
 
 pub struct Cli {
-    pub history: Vec<String>,
+    pub history: Vec<Vec<char>>,
     pub should_echo: bool,
     pub cursor_position: usize,
-    pub input: String,
+    pub input: Vec<char>,
 
     history_entry_to_display: i32,
     input_ready: bool,
-    input_stash: String,
+    input_stash: Vec<char>,
     insert_mode: bool,
 }
 
@@ -27,9 +27,9 @@ impl Cli {
             cursor_position: 0,
             history: Vec::new(),
             history_entry_to_display: -1,
-            input: String::new(),
+            input: Vec::new(),
             input_ready: false,
-            input_stash: String::new(),
+            input_stash: Vec::new(),
             insert_mode: true,
             should_echo,
         }
@@ -87,7 +87,7 @@ impl Cli {
 
 impl Perform for Cli {
     fn print(&mut self, c: char) {
-        let byte = c as u8;
+        let byte = c as u16;
         match byte {
             // backspace
             0x7f => {
@@ -104,7 +104,8 @@ impl Perform for Cli {
                     self.echo(&c.to_string());
                 } else if self.insert_mode {
                     // in insert mode, when cursor is in the middle, new character expand CLI
-                    // instead of replacing charcter under cursor
+                    // instead of replacing character under cursor
+
                     self.input.insert(self.cursor_position, c);
 
                     // for wasi target, we assume that hterm has enabled insert mode
@@ -114,10 +115,7 @@ impl Perform for Cli {
                     #[cfg(not(target_os = "wasi"))]
                     self.echo(&format!("\x1b[@{}", c));
                 } else {
-                    self.input.replace_range(
-                        self.cursor_position..self.cursor_position + 1,
-                        &c.to_string(),
-                    );
+                    self.input[self.cursor_position] = c;
 
                     #[cfg(target_os = "wasi")]
                     self.echo(&format!("\x1b[P{}", c));
@@ -129,6 +127,7 @@ impl Perform for Cli {
                 self.cursor_position += 1;
             }
         }
+
         io::stdout().flush().unwrap();
     }
 
@@ -139,7 +138,6 @@ impl Perform for Cli {
             0xa | 0xd => {
                 self.echo("\n");
                 self.cursor_position = 0;
-                self.input = self.input.trim().to_string();
                 self.input_ready = true;
             }
             _ => {/* ignore for now */}
@@ -148,6 +146,7 @@ impl Perform for Cli {
     }
 
     fn hook(&mut self, _params: &Params, _intermediates: &[u8], _ignore: bool, _c: char) {
+
         /* ignore for now */
     }
 
@@ -181,7 +180,7 @@ impl Perform for Cli {
                         self.input =
                             self.history[self.history_entry_to_display as usize].clone();
                         self.cursor_position = self.input.len();
-                        self.echo(&self.input);
+                        self.echo(&self.input.iter().collect::<String>());
                     }
                 }
                 // DownArrow
@@ -198,7 +197,7 @@ impl Perform for Cli {
                             self.history_entry_to_display = -1;
                         }
                         self.cursor_position = self.input.len();
-                        self.echo(&self.input);
+                        self.echo(&self.input.iter().collect::<String>());
                     }
                 }
                 // RightArrow
@@ -246,7 +245,7 @@ impl Perform for Cli {
                         self.erase_input();
                         self.input = self.history[0].clone();
                         self.cursor_position = self.input.len();
-                        self.echo(&self.input);
+                        self.echo(&self.input.iter().collect::<String>());
                     }
                 }
                 // PageDown
@@ -256,7 +255,7 @@ impl Perform for Cli {
                         self.input = self.input_stash.clone();
                         self.history_entry_to_display = -1;
                         self.cursor_position = self.input.len();
-                        self.echo(&self.input);
+                        self.echo(&self.input.iter().collect::<String>());
                     }
                 }
                 (_, _) => {

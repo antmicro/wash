@@ -110,7 +110,7 @@ fn history(
     output_device: &mut OutputDevice,
 ) -> Result<i32, Report> {
     for (i, history_entry) in shell.cli.history.iter().enumerate() {
-        output_device.println(&format!("{}: {}", i + 1, history_entry));
+        output_device.println(&format!("{}: {}", i + 1, history_entry.iter().collect::<String>()));
     }
     Ok(EXIT_SUCCESS)
 }

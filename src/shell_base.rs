@@ -596,7 +596,11 @@ impl Shell {
             }
         }
 
-        *input = self.cli.input.clone();
+        *input = self.cli.input
+            .iter()
+            .collect::<String>()
+            .trim()
+            .to_string();
         Ok(true)
     }
 
@@ -604,7 +608,7 @@ impl Shell {
     fn history_expansion(&mut self, input: &str) -> HistoryExpansion {
         let mut processed = input.to_string();
         if let Some(last_command) = self.cli.history.last() {
-            processed = processed.replace("!!", last_command);
+            processed = processed.replace("!!", &last_command.iter().collect::<String>());
         }
         // for eg. "!12", "!-2"
         lazy_static! {
@@ -624,7 +628,7 @@ impl Shell {
             // get that entry from history (if it exists)
             if let Some(history_cmd) = self.cli.history.get(history_number) {
                 // replace the match with the entry from history
-                processed = processed.replace(full_match, history_cmd);
+                processed = processed.replace(full_match, &history_cmd.iter().collect::<String>());
             } else {
                 return HistoryExpansion::EventNotFound(full_match.into());
             }
@@ -648,10 +652,10 @@ impl Shell {
                 .history
                 .iter()
                 .rev()
-                .find(|entry| entry.starts_with(group_match))
+                .find(|entry| entry.starts_with(&group_match.chars().collect::<Vec<char>>()))
             {
                 // replace the match with the entry from history
-                processed = processed.replace(full_match, history_cmd);
+                processed = processed.replace(full_match, &history_cmd.iter().collect::<String>());
             } else {
                 return HistoryExpansion::EventNotFound(full_match.into());
             }
@@ -679,8 +683,10 @@ impl Shell {
             self.cli.history = fs::read_to_string(&self.history_path)
                 .unwrap()
                 .lines()
-                .map(str::to_string)
-                .collect();
+                .map(|line| {
+                    line.chars().collect::<Vec<char>>()
+                })
+                .collect::<Vec<Vec<char>>>();
         }
 
         let washrc_path = {
@@ -737,8 +743,9 @@ impl Shell {
                 .open(&self.history_path)
             {
                 Ok(mut file) => {
-                    if Some(&input) != self.cli.history.last() {
-                        self.cli.history.push(input.clone());
+                    let vectored_input = input.chars().collect::<Vec<char>>();
+                    if Some(&vectored_input) != self.cli.history.last() {
+                        self.cli.history.push(vectored_input);
                         writeln!(file, "{}", &input).unwrap();
                     }
                 }
