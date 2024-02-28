@@ -732,9 +732,17 @@ impl Shell {
                     eprintln!("{event}: event not found");
                 }
                 HistoryExpansion::Unchanged => {
+                    if let Ok(true) = is_fd_tty(STDIN) {
+                        self.restore_default_mode()?;
+                    }
+
                     if let Err(error) = self.handle_input(&input) {
                         eprintln!("{error:#?}");
                     };
+
+                    if let Ok(true) = is_fd_tty(STDIN) {
+                        self.enable_interpreter_mode()?;
+                    }
                 }
             }
             match OpenOptions::new()
@@ -780,11 +788,6 @@ impl Shell {
             output_device.eprintln(format!("{}: {}", env!("CARGO_PKG_NAME"), err).as_str());
             output_device.flush()?;
             return Ok(EXIT_FAILURE);
-        }
-
-        // restore termios
-        if let Ok(true) = is_fd_tty(STDIN) {
-            self.restore_default_mode()?;
         }
 
         let result: Result<i32, Report> = if let Some(internal) = INTERNALS_MAP.get(command) {
@@ -889,10 +892,6 @@ impl Shell {
                 }
             }
         };
-
-        if let Ok(true) = is_fd_tty(STDIN) {
-            self.enable_interpreter_mode()?;
-        }
 
         output_device.flush()?;
 
