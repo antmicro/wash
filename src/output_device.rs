@@ -71,7 +71,6 @@ impl<'a> OutputDevice<'a> {
                 .create(true)
                 .open(path)?,
             Some(Redirect::Append(_, path)) => OpenOptions::new()
-                .write(true)
                 .append(true)
                 .create(true)
                 .open(path)?,
