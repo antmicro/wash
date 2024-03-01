@@ -306,7 +306,7 @@ impl<'a> InputInterpreter<'a> {
                 self.handle_compound_command(shell, cmd, background, redirects)
             }
             ast::PipeableCommand::FunctionDef(_name, _cmds) => {
-                eprintln!("FunctionDef not yet handled (but it would be cool)");
+                eprintln!("FunctionDef not handled");
                 EXIT_FAILURE
             }
         }
@@ -380,7 +380,7 @@ impl<'a> InputInterpreter<'a> {
                 self.handle_compound_case(shell, word, arms, background)
             }
             any => {
-                eprintln!("CompoundCommandKind not yet handled: {any:#?}");
+                eprintln!("CompoundCommandKind not handled: {any:#?}");
                 EXIT_FAILURE
             }
         };
@@ -823,7 +823,7 @@ impl<'a> InputInterpreter<'a> {
             }
             // TODO: Heredoc (multiline command parsing) implementation
             any => {
-                eprintln!("Redirect not yet handled: {any:?}");
+                eprintln!("Redirect not handled: {any:?}");
                 None
             }
         }
@@ -914,7 +914,7 @@ impl<'a> InputInterpreter<'a> {
                     },
                 )),
                 any => {
-                    eprintln!("parameter not yet handled: {any:?}");
+                    eprintln!("parameter not handled: {any:?}");
                     None
                 }
             },
@@ -923,7 +923,7 @@ impl<'a> InputInterpreter<'a> {
             ast::SimpleWord::SquareOpen => Some("[".to_string()),
             ast::SimpleWord::SquareClose => Some("]".to_string()),
             any => {
-                eprintln!("simple word not yet handled: {any:?}");
+                eprintln!("simple word not handled: {any:?}");
                 None
             }
         }

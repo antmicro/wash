@@ -29,6 +29,9 @@ use wasi;
 #[cfg(target_os = "wasi")]
 use wasi_ext_lib::termios;
 
+use vte::Parser;
+
+use crate::cli::Cli;
 use crate::internals::INTERNALS_MAP;
 use crate::interpreter::InputInterpreter;
 use crate::output_device::OutputDevice;
@@ -501,24 +504,18 @@ pub struct Shell {
     pub args: VecDeque<String>,
     pub last_exit_status: i32,
     pub last_job_pid: Option<u32>,
-    pub history: Vec<String>,
+    pub cli: Cli,
 
     history_path: PathBuf,
-    should_echo: bool,
-    cursor_position: usize,
-    insert_mode: bool,
     termios_mode: Option<Termios>,
-
     reader: InternalReader,
 }
 
 impl Shell {
     pub fn new(should_echo: bool, pwd: &str, args: VecDeque<String>) -> Self {
         Shell {
-            should_echo,
             pwd: PathBuf::from(pwd),
             args,
-            history: Vec::new(),
             history_path: PathBuf::from(if PathBuf::from(env::var("HOME").unwrap()).exists() {
                 format!(
                     "{}/.{}_history",
@@ -535,17 +532,16 @@ impl Shell {
             vars: HashMap::new(),
             last_exit_status: EXIT_SUCCESS,
             last_job_pid: None,
-            cursor_position: 0,
-            insert_mode: true,
             termios_mode: None,
             reader: InternalReader::OnlyStdin,
+            cli: Cli::new(should_echo),
         }
     }
 
     fn print_prompt(&mut self, input: &str) {
         print!("{}{}", self.parse_prompt_string(), input);
         io::stdout().flush().unwrap();
-        self.cursor_position = input.len();
+        self.cli.cursor_position = input.len();
     }
 
     fn parse_prompt_string(&self) -> String {
@@ -579,15 +575,6 @@ impl Shell {
             )
     }
 
-    fn echo(&self, output: &str) {
-        if self.should_echo {
-            // TODO: should this maybe use OutputDevice too?
-            print!("{output}");
-        } else if output.contains('\n') {
-            println!();
-        }
-    }
-
     pub fn run_command(&mut self, command: &str) -> Result<i32, Report> {
         self.handle_input(command)
     }
@@ -596,270 +583,26 @@ impl Shell {
         self.handle_input(&fs::read_to_string(script_name.into()).unwrap())
     }
 
-    fn get_cursor_to_beginning(&mut self) {
-        if self.cursor_position > 0 {
-            // bring cursor to the beggining with `ESC[nD` escape sequence
-            self.echo(&format!("\x1b[{}D", self.cursor_position));
-        }
-        self.cursor_position = 0;
-    }
-
-    fn get_cursor_to_end(&mut self, input: &String) {
-        let to_end = input.len() - self.cursor_position;
-        if input.len() - self.cursor_position > 0 {
-            // bring cursor to the end with `ESC[nC` escape sequence
-            self.echo(&format!("\x1b[{}C", to_end));
-        }
-        self.cursor_position = input.len();
-    }
-
-    fn erase_input(&mut self) {
-        // bring cursor to the beginning and clear line to the right with `ESC[0K`
-        self.get_cursor_to_beginning();
-        self.echo("\x1b[0K");
-    }
-
-    /// Builds a line from standard input.
-    // TODO: maybe wrap in one more loop and only return when non-empty line is produced?
-    // returns Ok(false) when SigInt occurred
     fn get_line(&mut self, input: &mut String) -> Result<bool, Report> {
-        let mut input_stash = String::new();
+        let mut vt_parser = Parser::new();
+        self.cli.reset();
 
-        let mut c1;
-        let mut escaped = false;
-        let mut history_entry_to_display: i32 = -1;
-        if !self.insert_mode {
-            self.insert_mode = true;
-        }
-
-        loop {
-            // this is to handle EOF when piping to shell
+        while !self.cli.is_input_ready() {
             match self.reader.read_byte()? {
-                Some(byte) => c1 = byte,
+                Some(byte) => vt_parser.advance(&mut self.cli, byte),
                 None => return Ok(false),
             }
-            if escaped {
-                match c1 {
-                    0x5b => {
-                        let c2 = match self.reader.read_byte()? {
-                            Some(byte) => byte,
-                            None => return Ok(false),
-                        };
-
-                        match c2 {
-                            0x32 | 0x33 | 0x35 | 0x36 => {
-                                let c3 = match self.reader.read_byte()? {
-                                    Some(byte) => byte,
-                                    None => return Ok(false),
-                                };
-                                match [c2, c3] {
-                                    // PageUp
-                                    [0x35, 0x7e] => {
-                                        if !self.history.is_empty() && history_entry_to_display != 0
-                                        {
-                                            if history_entry_to_display == -1 {
-                                                input_stash = input.clone();
-                                            }
-                                            history_entry_to_display = 0;
-                                            self.erase_input();
-                                            *input = self.history[0].clone();
-                                            self.cursor_position = input.len();
-                                            self.echo(input);
-                                        }
-                                        escaped = false;
-                                    }
-                                    // PageDown
-                                    [0x36, 0x7e] => {
-                                        if history_entry_to_display != -1 {
-                                            self.erase_input();
-                                            *input = input_stash.clone();
-                                            history_entry_to_display = -1;
-                                            self.cursor_position = input.len();
-                                            self.echo(input);
-                                        }
-                                        escaped = false;
-                                    }
-                                    // Insert
-                                    [0x32, 0x7e] => {
-                                        self.insert_mode = !self.insert_mode;
-                                        escaped = false;
-                                    }
-                                    // delete key
-                                    [0x33, 0x7e] => {
-                                        if input.len() - self.cursor_position > 0 {
-                                            self.echo(
-                                                &" ".repeat(input.len() - self.cursor_position + 1),
-                                            );
-                                            input.remove(self.cursor_position);
-                                            self.echo(
-                                                &format!("{}", 8 as char)
-                                                    .repeat(input.len() - self.cursor_position + 2),
-                                            );
-                                            self.echo(
-                                                &input
-                                                    .chars()
-                                                    .skip(self.cursor_position)
-                                                    .collect::<String>(),
-                                            );
-                                            self.echo(
-                                                &format!("{}", 8 as char)
-                                                    .repeat(input.len() - self.cursor_position),
-                                            );
-                                        }
-                                        escaped = false;
-                                    }
-                                    [0x33, 0x3b] => {
-                                        println!("TODO: SHIFT + DELETE");
-                                        let mut c4 = [0; 2];
-                                        // TWO MORE! TODO: improve!
-                                        io::stdin().read_exact(&mut c4).unwrap();
-                                        escaped = false;
-                                    }
-                                    _ => {
-                                        println!("TODO: [ + 0x{:02x} + 0x{:02x}", c2, c3);
-                                        escaped = false;
-                                    }
-                                }
-                            }
-                            // up arrow
-                            0x41 => {
-                                if !self.history.is_empty() && history_entry_to_display != 0 {
-                                    if history_entry_to_display == -1 {
-                                        history_entry_to_display = (self.history.len() - 1) as i32;
-                                        input_stash = input.clone();
-                                    } else if history_entry_to_display > 0 {
-                                        history_entry_to_display -= 1;
-                                    }
-
-                                    self.erase_input();
-                                    *input =
-                                        self.history[history_entry_to_display as usize].clone();
-                                    self.cursor_position = input.len();
-                                    self.echo(input);
-                                }
-                                escaped = false;
-                            }
-                            // down arrow
-                            0x42 => {
-                                if history_entry_to_display != -1 {
-                                    self.erase_input();
-                                    if self.history.len() - 1 > (history_entry_to_display as usize)
-                                    {
-                                        history_entry_to_display += 1;
-                                        *input =
-                                            self.history[history_entry_to_display as usize].clone();
-                                    } else {
-                                        *input = input_stash.clone();
-                                        history_entry_to_display = -1;
-                                    }
-                                    self.cursor_position = input.len();
-                                    self.echo(input);
-                                }
-                                escaped = false;
-                            }
-                            // right arrow
-                            0x43 => {
-                                if self.cursor_position < input.len() {
-                                    // move cursor right with `ESC[C`
-                                    self.echo("\x1b[C");
-                                    self.cursor_position += 1;
-                                }
-                                escaped = false;
-                            }
-                            // left arrow
-                            0x44 => {
-                                if self.cursor_position > 0 {
-                                    // move cursor left with `ESC[D`
-                                    self.echo("\x1b[D");
-                                    self.cursor_position -= 1;
-                                }
-                                escaped = false;
-                            }
-                            // end key
-                            0x46 => {
-                                self.get_cursor_to_end(input);
-                                escaped = false;
-                            }
-                            // home key
-                            0x48 => {
-                                self.get_cursor_to_beginning();
-                                escaped = false;
-                            }
-                            _ => {
-                                println!("WE HAVE UNKNOWN CONTROL CODE '[' + {}", c2);
-                                escaped = false;
-                            }
-                        }
-                    }
-                    _ => {
-                        escaped = false;
-                    }
-                }
-            } else {
-                if c1 != 0x1b {
-                    history_entry_to_display = -1;
-                }
-                match c1 {
-                    // enter
-                    10 | 13 => {
-                        self.echo("\n");
-                        self.cursor_position = 0;
-                        *input = input.trim().to_string();
-                        return Ok(true);
-                    }
-                    // backspace
-                    127 => {
-                        if !input.is_empty() && self.cursor_position > 0 {
-                            self.echo("\x1b[D\x1b[P");
-                            input.remove(self.cursor_position - 1);
-                            self.cursor_position -= 1;
-                        }
-                    }
-                    // control codes
-                    code if code < 32 => {
-                        if code == 0x1b {
-                            escaped = true;
-                        }
-                        // ignore rest for now
-                    }
-                    // regular characters
-                    _ => {
-                        if self.cursor_position == input.len() {
-                            input.push(c1 as char);
-                            self.echo(std::str::from_utf8(&[c1]).unwrap());
-                        } else if self.insert_mode {
-                            // in insert mode, when cursor is in the middle, new character expand CLI
-                            // instead of replacing charcter under cursor
-                            input.insert(self.cursor_position, c1 as char);
-
-                            // for wasi target, we assume that hterm has enabled insert mode
-                            #[cfg(target_os = "wasi")]
-                            self.echo(std::str::from_utf8(&[c1]).unwrap());
-
-                            #[cfg(not(target_os = "wasi"))]
-                            self.echo(&format!("\x1b[@{}", std::str::from_utf8(&[c1]).unwrap()));
-                        } else {
-                            input.replace_range(
-                                self.cursor_position..self.cursor_position + 1,
-                                std::str::from_utf8(&[c1]).unwrap(),
-                            );
-
-                            self.echo(std::str::from_utf8(&[c1]).unwrap());
-                        }
-
-                        self.cursor_position += 1;
-                    }
-                }
-            }
-            io::stdout().flush().unwrap();
         }
+
+        *input = self.cli.input.iter().collect::<String>().trim().to_string();
+        Ok(true)
     }
 
     /// Expands input line with history expansion.
     fn history_expansion(&mut self, input: &str) -> HistoryExpansion {
         let mut processed = input.to_string();
-        if let Some(last_command) = self.history.last() {
-            processed = processed.replace("!!", last_command);
+        if let Some(last_command) = self.cli.history.last() {
+            processed = processed.replace("!!", &last_command.iter().collect::<String>());
         }
         // for eg. "!12", "!-2"
         lazy_static! {
@@ -872,14 +615,14 @@ impl Shell {
             let group_match = captures.get(1).unwrap().as_str();
             let history_number = group_match.parse::<i32>().unwrap();
             let history_number = if history_number < 0 {
-                (self.history.len() as i32 + history_number) as usize
+                (self.cli.history.len() as i32 + history_number) as usize
             } else {
                 (history_number - 1) as usize
             };
             // get that entry from history (if it exists)
-            if let Some(history_cmd) = self.history.get(history_number) {
+            if let Some(history_cmd) = self.cli.history.get(history_number) {
                 // replace the match with the entry from history
-                processed = processed.replace(full_match, history_cmd);
+                processed = processed.replace(full_match, &history_cmd.iter().collect::<String>());
             } else {
                 return HistoryExpansion::EventNotFound(full_match.into());
             }
@@ -899,13 +642,14 @@ impl Shell {
 
             // find history entry starting with the match
             if let Some(history_cmd) = self
+                .cli
                 .history
                 .iter()
                 .rev()
-                .find(|entry| entry.starts_with(group_match))
+                .find(|entry| entry.starts_with(&group_match.chars().collect::<Vec<char>>()))
             {
                 // replace the match with the entry from history
-                processed = processed.replace(full_match, history_cmd);
+                processed = processed.replace(full_match, &history_cmd.iter().collect::<String>());
             } else {
                 return HistoryExpansion::EventNotFound(full_match.into());
             }
@@ -930,11 +674,11 @@ impl Shell {
         }
 
         if PathBuf::from(&self.history_path).exists() {
-            self.history = fs::read_to_string(&self.history_path)
+            self.cli.history = fs::read_to_string(&self.history_path)
                 .unwrap()
                 .lines()
-                .map(str::to_string)
-                .collect();
+                .map(|line| line.chars().collect::<Vec<char>>())
+                .collect::<Vec<Vec<char>>>();
         }
 
         let washrc_path = {
@@ -980,9 +724,17 @@ impl Shell {
                     eprintln!("{event}: event not found");
                 }
                 HistoryExpansion::Unchanged => {
+                    if let Ok(true) = is_fd_tty(STDIN) {
+                        self.restore_default_mode()?;
+                    }
+
                     if let Err(error) = self.handle_input(&input) {
                         eprintln!("{error:#?}");
                     };
+
+                    if let Ok(true) = is_fd_tty(STDIN) {
+                        self.enable_interpreter_mode()?;
+                    }
                 }
             }
             match OpenOptions::new()
@@ -991,8 +743,9 @@ impl Shell {
                 .open(&self.history_path)
             {
                 Ok(mut file) => {
-                    if Some(&input) != self.history.last() {
-                        self.history.push(input.clone());
+                    let vectored_input = input.chars().collect::<Vec<char>>();
+                    if Some(&vectored_input) != self.cli.history.last() {
+                        self.cli.history.push(vectored_input);
                         writeln!(file, "{}", &input).unwrap();
                     }
                 }
@@ -1027,11 +780,6 @@ impl Shell {
             output_device.eprintln(format!("{}: {}", env!("CARGO_PKG_NAME"), err).as_str());
             output_device.flush()?;
             return Ok(EXIT_FAILURE);
-        }
-
-        // restore termios
-        if let Ok(true) = is_fd_tty(STDIN) {
-            self.restore_default_mode()?;
         }
 
         let result: Result<i32, Report> = if let Some(internal) = INTERNALS_MAP.get(command) {
@@ -1137,10 +885,6 @@ impl Shell {
             }
         };
 
-        if let Ok(true) = is_fd_tty(STDIN) {
-            self.enable_interpreter_mode()?;
-        }
-
         output_device.flush()?;
 
         self.last_exit_status = if let Ok(exit_status) = result {
@@ -1186,7 +930,7 @@ impl Shell {
         #[cfg(target_os = "wasi")]
         {
             self.termios_mode = Some(termios_mode);
-            self.should_echo = (termios_mode.c_lflag & termios::ECHO) != 0;
+            self.cli.should_echo = (termios_mode.c_lflag & termios::ECHO) != 0;
             termios_mode.c_lflag |= termios::ISIG;
             termios_mode.c_lflag &= !(termios::ICANON | termios::ECHO);
         }
@@ -1194,7 +938,7 @@ impl Shell {
         #[cfg(not(target_os = "wasi"))]
         {
             self.termios_mode = Some(termios_mode.clone());
-            self.should_echo = termios_mode.local_flags.contains(termios::LocalFlags::ECHO);
+            self.cli.should_echo = termios_mode.local_flags.contains(termios::LocalFlags::ECHO);
             termios_mode.local_flags |= termios::LocalFlags::ISIG;
             termios_mode.local_flags &= !(termios::LocalFlags::ICANON | termios::LocalFlags::ECHO);
         }
