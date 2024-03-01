@@ -589,18 +589,12 @@ impl Shell {
 
         while !self.cli.is_input_ready() {
             match self.reader.read_byte()? {
-                Some(byte) => {
-                    vt_parser.advance(&mut self.cli, byte)
-                },
+                Some(byte) => vt_parser.advance(&mut self.cli, byte),
                 None => return Ok(false),
             }
         }
 
-        *input = self.cli.input
-            .iter()
-            .collect::<String>()
-            .trim()
-            .to_string();
+        *input = self.cli.input.iter().collect::<String>().trim().to_string();
         Ok(true)
     }
 
@@ -683,9 +677,7 @@ impl Shell {
             self.cli.history = fs::read_to_string(&self.history_path)
                 .unwrap()
                 .lines()
-                .map(|line| {
-                    line.chars().collect::<Vec<char>>()
-                })
+                .map(|line| line.chars().collect::<Vec<char>>())
                 .collect::<Vec<Vec<char>>>();
         }
 

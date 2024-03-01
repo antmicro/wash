@@ -49,7 +49,6 @@ impl Cli {
         if !self.insert_mode {
             self.insert_mode = true;
         }
-
     }
 
     fn echo(&self, output: &str) {
@@ -140,13 +139,12 @@ impl Perform for Cli {
                 self.cursor_position = 0;
                 self.input_ready = true;
             }
-            _ => {/* ignore for now */}
+            _ => { /* ignore for now */ }
         }
         io::stdout().flush().unwrap();
     }
 
     fn hook(&mut self, _params: &Params, _intermediates: &[u8], _ignore: bool, _c: char) {
-
         /* ignore for now */
     }
 
@@ -177,8 +175,7 @@ impl Perform for Cli {
                         }
 
                         self.erase_input();
-                        self.input =
-                            self.history[self.history_entry_to_display as usize].clone();
+                        self.input = self.history[self.history_entry_to_display as usize].clone();
                         self.cursor_position = self.input.len();
                         self.echo(&self.input.iter().collect::<String>());
                     }
@@ -187,8 +184,7 @@ impl Perform for Cli {
                 (_, 'B') => {
                     if self.history_entry_to_display != -1 {
                         self.erase_input();
-                        if self.history.len() - 1 > (self.history_entry_to_display as usize)
-                        {
+                        if self.history.len() - 1 > (self.history_entry_to_display as usize) {
                             self.history_entry_to_display += 1;
                             self.input =
                                 self.history[self.history_entry_to_display as usize].clone();
@@ -258,9 +254,7 @@ impl Perform for Cli {
                         self.echo(&self.input.iter().collect::<String>());
                     }
                 }
-                (_, _) => {
-                    /* ignore for now */
-                }
+                (_, _) => { /* ignore for now */ }
             }
         } else {
             /* ignore for now */
