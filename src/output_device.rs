@@ -70,10 +70,9 @@ impl<'a> OutputDevice<'a> {
                 .truncate(true)
                 .create(true)
                 .open(path)?,
-            Some(Redirect::Append(_, path)) => OpenOptions::new()
-                .append(true)
-                .create(true)
-                .open(path)?,
+            Some(Redirect::Append(_, path)) => {
+                OpenOptions::new().append(true).create(true).open(path)?
+            }
             Some(Redirect::ReadWrite(_, path)) => {
                 OpenOptions::new().write(true).create(true).open(path)?
             }
