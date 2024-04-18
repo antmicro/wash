@@ -106,20 +106,9 @@ impl Perform for Cli {
                     // instead of replacing character under cursor
 
                     self.input.insert(self.cursor_position, c);
-
-                    // for wasi target, we assume that hterm has enabled insert mode
-                    #[cfg(target_os = "wasi")]
-                    self.echo(&c.to_string());
-
-                    #[cfg(not(target_os = "wasi"))]
                     self.echo(&format!("\x1b[@{}", c));
                 } else {
                     self.input[self.cursor_position] = c;
-
-                    #[cfg(target_os = "wasi")]
-                    self.echo(&format!("\x1b[P{}", c));
-
-                    #[cfg(not(target_os = "wasi"))]
                     self.echo(&c.to_string());
                 }
 
