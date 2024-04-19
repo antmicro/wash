@@ -21,7 +21,7 @@ jobs:
           wget -q https://raw.githubusercontent.com/antmicro/wasi_ext_lib/main/canonicalize.patch
           tar xvf wasi-sdk-16.0-linux.tar.gz
           echo "WASI_SDK_PATH=$(pwd)/wasi-sdk-16.0" >> "$GITHUB_ENV"
-          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y > /dev/null 2> /dev/null
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- --default-host x86_64-unknown-linux-gnu --default-toolchain 1.77.2 --profile default -y > /dev/null 2> /dev/null
           source $HOME/.cargo/env
           rustup target add wasm32-wasi
       - name: Run Rust linter

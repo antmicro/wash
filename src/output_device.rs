@@ -73,9 +73,11 @@ impl<'a> OutputDevice<'a> {
             Some(Redirect::Append(_, path)) => {
                 OpenOptions::new().append(true).create(true).open(path)?
             }
-            Some(Redirect::ReadWrite(_, path)) => {
-                OpenOptions::new().write(true).create(true).open(path)?
-            }
+            Some(Redirect::ReadWrite(_, path)) => OpenOptions::new()
+                .write(true)
+                .create(true)
+                .truncate(true)
+                .open(path)?,
             Some(Redirect::PipeOut(fd)) => unsafe { File::from_raw_fd(*fd as RawFd) },
             Some(Redirect::Duplicate { fd_src, fd_dst: _ }) => unsafe {
                 File::from_raw_fd(*fd_src as RawFd)
