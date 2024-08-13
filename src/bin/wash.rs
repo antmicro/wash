@@ -6,8 +6,8 @@
 
 use std::collections::VecDeque;
 use std::env;
+use std::fs::File;
 use std::io;
-use std::io::Read;
 use std::path::PathBuf;
 use std::process;
 
@@ -139,7 +139,7 @@ fn main() {
     let result = if let Some(command) = matches.get_one::<String>("command") {
         shell.run_command(command)
     } else if len != 0 {
-        shell.run_script(PathBuf::from(script))
+        shell.run_commands(io::BufReader::new(File::open(script).unwrap()))
     } else {
         match is_fd_tty(STDIN) {
             Err(_) => {
@@ -166,12 +166,7 @@ fn main() {
 
                 result
             }
-            Ok(false) => {
-                let mut input = String::new();
-                let stdin = io::stdin();
-                stdin.lock().read_to_string(&mut input).unwrap();
-                shell.run_command(&input)
-            }
+            Ok(false) => shell.run_commands(io::stdin()),
         }
     };
 

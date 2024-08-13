@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::env;
 #[cfg(target_os = "wasi")]
@@ -18,13 +19,19 @@ use std::os::fd::IntoRawFd;
 #[cfg(target_os = "wasi")]
 use std::path::Path;
 use std::path::PathBuf;
+use std::rc::Rc;
 
 use conch_parser::ast::{
-    self, ComplexWord::Single, GuardBodyPair, PatternBodyPair, SimpleWord::Param, TopLevelCommand,
-    TopLevelWord, Word::Simple,
+    self,
+    builder::{Builder, DefaultBuilder},
+    ComplexWord::Single,
+    GuardBodyPair, PatternBodyPair,
+    SimpleWord::Param,
+    TopLevelCommand, TopLevelWord,
+    Word::Simple,
 };
 use conch_parser::lexer::Lexer;
-use conch_parser::parse::{DefaultParser, ParseError, SourcePos};
+use conch_parser::parse::{DefaultParser, ParseError, ParseResult, ParserIterator, SourcePos};
 
 use glob::Pattern;
 
@@ -43,23 +50,91 @@ use crate::shell_base::{apply_redirects, wait_for_child};
 
 use crate::saved_fd::SavedFd;
 
-pub struct InputInterpreter<'a> {
-    input: &'a str,
+struct CachingIterator<I: Iterator> {
+    iter: I,
+    cache: Rc<RefCell<Vec<I::Item>>>,
 }
 
-impl<'a> InputInterpreter<'a> {
-    pub fn from_input(input: &str) -> InputInterpreter {
-        InputInterpreter { input }
+impl<I: Iterator> CachingIterator<I> {
+    pub fn new(iter: I, cache: Rc<RefCell<Vec<I::Item>>>) -> Self {
+        Self { iter, cache }
+    }
+}
+
+impl<I> Iterator for CachingIterator<I>
+where
+    I: Iterator,
+    I::Item: Clone,
+{
+    type Item = I::Item;
+
+    fn next(&mut self) -> Option<I::Item> {
+        if let Some(c) = self.iter.next() {
+            self.cache.borrow_mut().push(c.clone());
+            Some(c)
+        } else {
+            None
+        }
+    }
+}
+
+struct CommandIterator<I>
+where
+    I: Iterator<Item = char>,
+{
+    parser: ParserIterator<Lexer<CachingIterator<I>>, DefaultBuilder<String>>,
+    cache: Rc<RefCell<Vec<I::Item>>>,
+}
+
+impl<I: Iterator<Item = char>> CommandIterator<I> {
+    pub fn new(input: I) -> Self {
+        let cache_vec: Rc<RefCell<Vec<char>>> = Rc::new(RefCell::new(vec![]));
+        Self {
+            parser: DefaultParser::new(Lexer::new(CachingIterator::new(
+                input,
+                Rc::clone(&cache_vec),
+            )))
+            .into_iter(),
+            cache: Rc::clone(&cache_vec),
+        }
+    }
+}
+
+impl<I: Iterator<Item = char>> Iterator for CommandIterator<I> {
+    type Item = (
+        String,
+        ParseResult<
+            <DefaultBuilder<String> as Builder>::Command,
+            <DefaultBuilder<String> as Builder>::Error,
+        >,
+    );
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if let Some(cmd) = self.parser.next() {
+            Some((self.cache.borrow().iter().collect::<String>(), cmd))
+        } else {
+            None
+        }
+    }
+}
+
+pub struct InputInterpreter<I: Iterator<Item = char>> {
+    cmd_iter: CommandIterator<I>,
+}
+
+impl<I: std::iter::Iterator<Item = char>> InputInterpreter<I> {
+    pub fn new(iter: I) -> Self {
+        Self {
+            cmd_iter: CommandIterator::new(iter),
+        }
     }
 
     pub fn interpret(&mut self, shell: &mut Shell) -> i32 {
-        let lex = Lexer::new(self.input.chars());
-        let parser = DefaultParser::new(lex);
         let mut exit_status = EXIT_SUCCESS;
 
-        for cmd in parser {
+        let _ = &mut self.cmd_iter.try_for_each(|(text, cmd)| {
             exit_status = match cmd {
-                Ok(cmd) => self.handle_top_level_command(shell, &cmd),
+                Ok(cmd) => Self::handle_top_level_command(shell, &cmd, &text),
                 Err(e) => {
                     let err_msg = match e {
                         /*
@@ -70,15 +145,14 @@ impl<'a> InputInterpreter<'a> {
                         ParseError::BadFd(pos_start, pos_end) => {
                             let idx_start = pos_start.byte;
                             let idx_end = pos_end.byte;
-                            format!(
-                                "{}: ambiguous redirect",
-                                self.input[idx_start..idx_end].to_owned()
-                            )
+                            format!("{}: ambiguous redirect", &text[idx_start..idx_end])
                         }
                         ParseError::BadIdent(_, _) => "bad idenftifier".to_string(),
                         ParseError::BadSubst(_, _) => "bad substitution".to_string(),
                         ParseError::Unmatched(_, _) => "unmached expression".to_string(),
-                        ParseError::IncompleteCmd(_, _, _, _) => "incomplete command".to_string(),
+                        ParseError::IncompleteCmd(_, _, _, _) => {
+                            format!("incomplete command {}", text)
+                        }
                         ParseError::Unexpected(_, _) => "unexpected token".to_string(),
                         ParseError::UnexpectedEOF => "unexpected end of file".to_string(),
                         ParseError::Custom(t) => {
@@ -91,36 +165,38 @@ impl<'a> InputInterpreter<'a> {
                 }
             };
             if exit_status == EXIT_INTERRUPTED {
-                break;
+                Err(())
+            } else {
+                Ok(())
             }
-        }
+        });
         // TODO: pass proper exit status code
         exit_status
     }
 
     fn handle_top_level_command(
-        &self,
         shell: &mut Shell,
         top_level_command: &ast::TopLevelCommand<String>,
+        text: &str,
     ) -> i32 {
         match &top_level_command.0 {
-            ast::Command::Job(list) => self.handle_listable_command(shell, list, true),
-            ast::Command::List(list) => self.handle_listable_command(shell, list, false),
+            ast::Command::Job(list) => Self::handle_listable_command(shell, list, text, true),
+            ast::Command::List(list) => Self::handle_listable_command(shell, list, text, false),
         }
     }
 
     fn handle_listable_command(
-        &self,
         shell: &mut Shell,
         list: &ast::DefaultAndOrList,
+        text: &str,
         background: bool,
     ) -> i32 {
         let mut status_code = match &list.first {
             ast::ListableCommand::Single(cmd) => {
-                self.handle_pipeable_command(shell, cmd, background, &mut Vec::new())
+                Self::handle_pipeable_command(shell, cmd, text, background, &mut Vec::new())
             }
             ast::ListableCommand::Pipe(negate, cmds) => {
-                self.handle_pipe(shell, *negate, cmds, background)
+                Self::handle_pipe(shell, *negate, cmds, text, background)
             }
         };
 
@@ -129,21 +205,29 @@ impl<'a> InputInterpreter<'a> {
                 (EXIT_INTERRUPTED, _) => return status_code,
                 (EXIT_SUCCESS, ast::AndOr::And(cmd)) => {
                     status_code = match &cmd {
-                        ast::ListableCommand::Single(cmd) => {
-                            self.handle_pipeable_command(shell, cmd, background, &mut Vec::new())
-                        }
+                        ast::ListableCommand::Single(cmd) => Self::handle_pipeable_command(
+                            shell,
+                            cmd,
+                            text,
+                            background,
+                            &mut Vec::new(),
+                        ),
                         ast::ListableCommand::Pipe(negate, cmds) => {
-                            self.handle_pipe(shell, *negate, cmds, background)
+                            Self::handle_pipe(shell, *negate, cmds, text, background)
                         }
                     }
                 }
                 (x, ast::AndOr::Or(cmd)) if x != EXIT_SUCCESS => {
                     status_code = match &cmd {
-                        ast::ListableCommand::Single(cmd) => {
-                            self.handle_pipeable_command(shell, cmd, background, &mut Vec::new())
-                        }
+                        ast::ListableCommand::Single(cmd) => Self::handle_pipeable_command(
+                            shell,
+                            cmd,
+                            text,
+                            background,
+                            &mut Vec::new(),
+                        ),
                         ast::ListableCommand::Pipe(negate, cmds) => {
-                            self.handle_pipe(shell, *negate, cmds, background)
+                            Self::handle_pipe(shell, *negate, cmds, text, background)
                         }
                     }
                 }
@@ -157,10 +241,10 @@ impl<'a> InputInterpreter<'a> {
     }
 
     fn handle_pipe(
-        &self,
         shell: &mut Shell,
         negate: bool,
         cmds: &[ast::DefaultPipeableCommand],
+        text: &str,
         background: bool,
     ) -> i32 {
         let exit_status = {
@@ -181,9 +265,10 @@ impl<'a> InputInterpreter<'a> {
                 (pipe.0.into_raw_fd() as Fd, pipe.1.into_raw_fd() as Fd)
             };
 
-            let mut exit_code = self.handle_pipeable_command(
+            let mut exit_code = Self::handle_pipeable_command(
                 shell,
                 &cmds[0],
+                text,
                 background,
                 &mut vec![Redirect::PipeOut(fd_writer)],
             );
@@ -228,9 +313,10 @@ impl<'a> InputInterpreter<'a> {
                     }
                 };
 
-                exit_code = self.handle_pipeable_command(
+                exit_code = Self::handle_pipeable_command(
                     shell,
                     cmd,
+                    text,
                     background,
                     &mut vec![Redirect::PipeIn(fd_reader), Redirect::PipeOut(fd_writer)],
                 );
@@ -263,9 +349,10 @@ impl<'a> InputInterpreter<'a> {
                     saved_reader
                 };
 
-                exit_code = self.handle_pipeable_command(
+                exit_code = Self::handle_pipeable_command(
                     shell,
                     cmds.last().unwrap(),
+                    text,
                     background,
                     &mut vec![Redirect::PipeIn(fd_reader)],
                 );
@@ -296,18 +383,18 @@ impl<'a> InputInterpreter<'a> {
     }
 
     fn handle_pipeable_command(
-        &self,
         shell: &mut Shell,
         cmd: &ast::DefaultPipeableCommand,
+        text: &str,
         background: bool,
         redirects: &mut Vec<Redirect>,
     ) -> i32 {
         match cmd {
             ast::PipeableCommand::Simple(cmd) => {
-                self.handle_simple_command(shell, cmd, background, redirects)
+                Self::handle_simple_command(shell, cmd, text, background, redirects)
             }
             ast::PipeableCommand::Compound(cmd) => {
-                self.handle_compound_command(shell, cmd, background, redirects)
+                Self::handle_compound_command(shell, cmd, text, background, redirects)
             }
             ast::PipeableCommand::FunctionDef(_name, _cmds) => {
                 eprintln!("FunctionDef not handled");
@@ -317,16 +404,16 @@ impl<'a> InputInterpreter<'a> {
     }
 
     fn handle_compound_command(
-        &self,
         shell: &mut Shell,
         cmd: &ast::DefaultCompoundCommand,
+        text: &str,
         background: bool,
         redirects: &mut Vec<Redirect>,
     ) -> i32 {
         let ast::CompoundCommand { kind, io } = cmd;
 
         for redirect_type in io.iter() {
-            if let Some(redirect) = self.handle_redirect_type(shell, redirect_type) {
+            if let Some(redirect) = Self::handle_redirect_type(shell, text, redirect_type) {
                 redirects.push(redirect);
             } else {
                 eprintln!("{}: cannot handle redirect!", env!("CARGO_PKG_NAME"));
@@ -349,8 +436,9 @@ impl<'a> InputInterpreter<'a> {
             end_pos,
         } = kind
         {
-            return self
-                .handle_compound_subshell(shell, body, start_pos, end_pos, background, redirects);
+            return Self::handle_compound_subshell(
+                shell, body, text, start_pos, end_pos, background, redirects,
+            );
         }
 
         let mut fds_to_restore: Vec<SavedFd> = Vec::new();
@@ -370,18 +458,18 @@ impl<'a> InputInterpreter<'a> {
                 end_pos: _,
             } => unreachable!(),
             ast::CompoundCommandKind::For { var, words, body } => match words {
-                Some(words) => self.handle_compound_for(shell, var, words, body, background),
+                Some(words) => Self::handle_compound_for(shell, var, words, body, text, background),
                 None => EXIT_SUCCESS,
             },
             ast::CompoundCommandKind::If {
                 conditionals,
                 else_branch,
-            } => self.handle_compound_if(shell, conditionals, else_branch, background),
+            } => Self::handle_compound_if(shell, conditionals, else_branch, text, background),
             ast::CompoundCommandKind::While(guard_body) => {
-                self.handle_compound_while(shell, guard_body, background)
+                Self::handle_compound_while(shell, guard_body, text, background)
             }
             ast::CompoundCommandKind::Case { word, arms } => {
-                self.handle_compound_case(shell, word, arms, background)
+                Self::handle_compound_case(shell, word, arms, text, background)
             }
             any => {
                 eprintln!("CompoundCommandKind not handled: {any:#?}");
@@ -395,15 +483,15 @@ impl<'a> InputInterpreter<'a> {
 
     #[cfg(target_os = "wasi")]
     fn handle_compound_subshell(
-        &self,
         shell: &mut Shell,
         _body: &[TopLevelCommand<String>],
+        text: &str,
         start_pos: &SourcePos,
         end_pos: &SourcePos,
         background: bool,
         redirects: &[Redirect],
     ) -> i32 {
-        let subshell_cmds = &self.input[(start_pos.byte + 1)..(end_pos.byte)];
+        let subshell_cmds = &text[(start_pos.byte + 1)..(end_pos.byte)];
 
         let mut args_vec = vec!["-c".to_string(), subshell_cmds.to_string()];
 
@@ -424,9 +512,9 @@ impl<'a> InputInterpreter<'a> {
 
     #[cfg(not(target_os = "wasi"))]
     fn handle_compound_subshell(
-        &self,
         shell: &mut Shell,
         body: &Vec<TopLevelCommand<String>>,
+        text: &str,
         _start_pos: &SourcePos,
         _end_pos: &SourcePos,
         background: bool,
@@ -451,7 +539,7 @@ impl<'a> InputInterpreter<'a> {
 
                 // Run subshell commands
                 for subshell_cmd in body {
-                    exit_status = self.handle_top_level_command(shell, subshell_cmd);
+                    exit_status = Self::handle_top_level_command(shell, subshell_cmd, text);
                     if exit_status == EXIT_INTERRUPTED {
                         break;
                     }
@@ -471,11 +559,11 @@ impl<'a> InputInterpreter<'a> {
     }
 
     fn handle_compound_for(
-        &self,
         shell: &mut Shell,
         var: &String,
         word_list: &Vec<TopLevelWord<String>>,
         body: &Vec<TopLevelCommand<String>>,
+        text: &str,
         // TODO: implement background jobs in compounds
         _background: bool,
     ) -> i32 {
@@ -486,7 +574,7 @@ impl<'a> InputInterpreter<'a> {
             match word {
                 TopLevelWord(Single(Simple(Param(_)))) => {
                     if let TopLevelWord(Single(Simple(param_word))) = word {
-                        if let Some(value) = self.handle_simple_word(shell, param_word) {
+                        if let Some(value) = Self::handle_simple_word(shell, text, param_word) {
                             finall_list.append(
                                 &mut value
                                     .split_whitespace()
@@ -497,7 +585,7 @@ impl<'a> InputInterpreter<'a> {
                     }
                 }
                 word => {
-                    if let Some(w) = self.handle_top_level_word(shell, word) {
+                    if let Some(w) = Self::handle_top_level_word(shell, word, text) {
                         finall_list.push(w);
                     }
                 }
@@ -507,7 +595,7 @@ impl<'a> InputInterpreter<'a> {
         for word in finall_list {
             env::set_var(var, word);
             for command in body {
-                exit_status = self.handle_top_level_command(shell, command);
+                exit_status = Self::handle_top_level_command(shell, command, text);
                 if exit_status == EXIT_INTERRUPTED {
                     return exit_status;
                 }
@@ -517,10 +605,10 @@ impl<'a> InputInterpreter<'a> {
     }
 
     fn handle_compound_if(
-        &self,
         shell: &mut Shell,
         conditionals: &Vec<GuardBodyPair<TopLevelCommand<String>>>,
         else_branch: &Option<Vec<TopLevelCommand<String>>>,
+        text: &str,
         // TODO: implement background jobs in compounds
         _background: bool,
     ) -> i32 {
@@ -528,14 +616,14 @@ impl<'a> InputInterpreter<'a> {
         let mut guard_status = EXIT_SUCCESS;
         for guard_body in conditionals {
             for command in &guard_body.guard {
-                guard_status = self.handle_top_level_command(shell, command);
+                guard_status = Self::handle_top_level_command(shell, command, text);
                 if guard_status == EXIT_INTERRUPTED {
                     return guard_status;
                 }
             }
             if guard_status == EXIT_SUCCESS {
                 for command in &guard_body.body {
-                    exit_status = self.handle_top_level_command(shell, command);
+                    exit_status = Self::handle_top_level_command(shell, command, text);
                     if exit_status == EXIT_INTERRUPTED {
                         return exit_status;
                     }
@@ -548,7 +636,7 @@ impl<'a> InputInterpreter<'a> {
         if guard_status != EXIT_SUCCESS && guard_status != EXIT_INTERRUPTED {
             if let Some(els) = else_branch {
                 for command in els {
-                    exit_status = self.handle_top_level_command(shell, command);
+                    exit_status = Self::handle_top_level_command(shell, command, text);
                     if exit_status == EXIT_INTERRUPTED {
                         break;
                     }
@@ -559,16 +647,16 @@ impl<'a> InputInterpreter<'a> {
     }
 
     fn handle_compound_while(
-        &self,
         shell: &mut Shell,
         guard_body: &GuardBodyPair<TopLevelCommand<String>>,
+        text: &str,
         // TODO: implement background jobs in compounds
         _background: bool,
     ) -> i32 {
         let mut exit_status = EXIT_SUCCESS;
         loop {
             for cmd in guard_body.guard.iter() {
-                exit_status = self.handle_top_level_command(shell, cmd);
+                exit_status = Self::handle_top_level_command(shell, cmd, text);
                 if exit_status == EXIT_INTERRUPTED {
                     return exit_status;
                 }
@@ -581,7 +669,7 @@ impl<'a> InputInterpreter<'a> {
             }
 
             for cmd in guard_body.body.iter() {
-                exit_status = self.handle_top_level_command(shell, cmd);
+                exit_status = Self::handle_top_level_command(shell, cmd, text);
                 if exit_status == EXIT_INTERRUPTED {
                     return exit_status;
                 }
@@ -591,22 +679,20 @@ impl<'a> InputInterpreter<'a> {
     }
 
     fn handle_compound_case(
-        &self,
         shell: &mut Shell,
         word: &TopLevelWord<String>,
         arms: &Vec<PatternBodyPair<TopLevelWord<String>, TopLevelCommand<String>>>,
+        text: &str,
         // TODO: implement background jobs in compounds
         _background: bool,
     ) -> i32 {
         let mut exit_status = EXIT_SUCCESS;
-        let handled_word = self
-            .handle_top_level_word(shell, word)
-            .unwrap_or("".to_string());
+        let handled_word = Self::handle_top_level_word(shell, word, text).unwrap_or("".to_string());
         for arm in arms {
             if arm.patterns.iter().any(|pattern| {
                 // TODO: Ctrl-C is not handled during processing pattern because `Subst`
                 // is not handled and we cannot execute any command in pattern
-                if let Some(handled_pattern) = self.handle_top_level_word(shell, pattern) {
+                if let Some(handled_pattern) = Self::handle_top_level_word(shell, pattern, text) {
                     if let Ok(pat) = Pattern::new(&handled_pattern) {
                         pat.matches(&handled_word)
                     } else {
@@ -622,7 +708,7 @@ impl<'a> InputInterpreter<'a> {
                 }
             }) {
                 for command in arm.body.iter() {
-                    exit_status = self.handle_top_level_command(shell, command);
+                    exit_status = Self::handle_top_level_command(shell, command, text);
                     if exit_status == EXIT_INTERRUPTED {
                         break;
                     }
@@ -634,9 +720,9 @@ impl<'a> InputInterpreter<'a> {
     }
 
     fn handle_simple_command(
-        &self,
         shell: &mut Shell,
         cmd: &ast::DefaultSimpleCommand,
+        text: &str,
         background: bool,
         redirects: &mut Vec<Redirect>,
     ) -> i32 {
@@ -647,13 +733,15 @@ impl<'a> InputInterpreter<'a> {
                 ast::RedirectOrEnvVar::EnvVar(key, value) => {
                     let value = match value {
                         None => Some("".to_string()),
-                        Some(top_level_word) => self.handle_top_level_word(shell, top_level_word),
+                        Some(top_level_word) => {
+                            Self::handle_top_level_word(shell, top_level_word, text)
+                        }
                     };
                     value.map(|value| (key.clone(), value))
                 }
                 ast::RedirectOrEnvVar::Redirect(redirect_type) => {
                     // TODO: in case of None break execution?
-                    if let Some(redirect) = self.handle_redirect_type(shell, redirect_type) {
+                    if let Some(redirect) = Self::handle_redirect_type(shell, text, redirect_type) {
                         redirects.push(redirect);
                     }
                     None
@@ -666,12 +754,12 @@ impl<'a> InputInterpreter<'a> {
             match redirect_or_cmd_word {
                 ast::RedirectOrCmdWord::Redirect(redirect_type) => {
                     // TODO: in case of None break execution?
-                    if let Some(redirect) = self.handle_redirect_type(shell, redirect_type) {
+                    if let Some(redirect) = Self::handle_redirect_type(shell, text, redirect_type) {
                         redirects.push(redirect);
                     }
                 }
                 ast::RedirectOrCmdWord::CmdWord(cmd_word) => {
-                    if let Some(arg) = self.handle_top_level_word(shell, &cmd_word.0) {
+                    if let Some(arg) = Self::handle_top_level_word(shell, &cmd_word.0, text) {
                         if let Ok(paths) = glob::glob_with(
                             &arg,
                             glob::MatchOptions {
@@ -727,8 +815,8 @@ impl<'a> InputInterpreter<'a> {
     }
 
     fn handle_redirect_type(
-        &self,
         shell: &mut Shell,
+        text: &str,
         redirect_type: &ast::Redirect<ast::TopLevelWord<String>>,
     ) -> Option<Redirect> {
         let get_absolute_path = |filename: String, sh: &Shell| {
@@ -743,7 +831,8 @@ impl<'a> InputInterpreter<'a> {
             ast::Redirect::Write(file_descriptor, top_level_word) => {
                 // TODO: check noclobber option is set
                 let file_descriptor = file_descriptor.map_or_else(|| STDOUT, |fd| fd as Fd);
-                if let Some(mut filename) = self.handle_top_level_word(shell, top_level_word) {
+                if let Some(mut filename) = Self::handle_top_level_word(shell, top_level_word, text)
+                {
                     filename = get_absolute_path(filename, shell);
                     Some(Redirect::Write(file_descriptor, filename))
                 } else {
@@ -752,7 +841,8 @@ impl<'a> InputInterpreter<'a> {
             }
             ast::Redirect::Append(file_descriptor, top_level_word) => {
                 let file_descriptor = file_descriptor.map_or_else(|| STDOUT, |fd| fd as Fd);
-                if let Some(mut filename) = self.handle_top_level_word(shell, top_level_word) {
+                if let Some(mut filename) = Self::handle_top_level_word(shell, top_level_word, text)
+                {
                     filename = get_absolute_path(filename, shell);
                     Some(Redirect::Append(file_descriptor, filename))
                 } else {
@@ -761,7 +851,8 @@ impl<'a> InputInterpreter<'a> {
             }
             ast::Redirect::Read(file_descriptor, top_level_word) => {
                 let file_descriptor = file_descriptor.map_or_else(|| STDIN, |fd| fd as Fd);
-                if let Some(mut filename) = self.handle_top_level_word(shell, top_level_word) {
+                if let Some(mut filename) = Self::handle_top_level_word(shell, top_level_word, text)
+                {
                     filename = get_absolute_path(filename, shell);
                     Some(Redirect::Read(file_descriptor, filename))
                 } else {
@@ -770,7 +861,8 @@ impl<'a> InputInterpreter<'a> {
             }
             ast::Redirect::ReadWrite(file_descriptor, top_level_word) => {
                 let file_descriptor = file_descriptor.map_or_else(|| STDIN, |fd| fd as Fd);
-                if let Some(mut filename) = self.handle_top_level_word(shell, top_level_word) {
+                if let Some(mut filename) = Self::handle_top_level_word(shell, top_level_word, text)
+                {
                     filename = get_absolute_path(filename, shell);
                     Some(Redirect::ReadWrite(file_descriptor, filename))
                 } else {
@@ -779,7 +871,8 @@ impl<'a> InputInterpreter<'a> {
             }
             ast::Redirect::Clobber(file_descriptor, top_level_word) => {
                 let file_descriptor = file_descriptor.map_or_else(|| STDOUT, |fd| fd as Fd);
-                if let Some(mut filename) = self.handle_top_level_word(shell, top_level_word) {
+                if let Some(mut filename) = Self::handle_top_level_word(shell, top_level_word, text)
+                {
                     filename = get_absolute_path(filename, shell);
                     Some(Redirect::Write(file_descriptor, filename))
                 } else {
@@ -788,7 +881,7 @@ impl<'a> InputInterpreter<'a> {
             }
             ast::Redirect::DupRead(file_descriptor, top_level_word) => {
                 let fd_dst = file_descriptor.map_or_else(|| STDIN, |fd| fd as Fd);
-                if let Some(fd) = self.handle_top_level_word(shell, top_level_word) {
+                if let Some(fd) = Self::handle_top_level_word(shell, top_level_word, text) {
                     match fd.as_str() {
                         "-" => Some(Redirect::Close(fd_dst as Fd)),
                         fd => {
@@ -806,7 +899,7 @@ impl<'a> InputInterpreter<'a> {
             }
             ast::Redirect::DupWrite(file_descriptor, top_level_word) => {
                 let fd_dst = file_descriptor.map_or_else(|| STDOUT, |fd| fd as Fd);
-                if let Some(fd) = self.handle_top_level_word(shell, top_level_word) {
+                if let Some(fd) = Self::handle_top_level_word(shell, top_level_word, text) {
                     match fd.as_str() {
                         "-" => Some(Redirect::Close(fd_dst as Fd)),
                         fd => {
@@ -831,30 +924,30 @@ impl<'a> InputInterpreter<'a> {
     }
 
     fn handle_top_level_word(
-        &self,
         shell: &mut Shell,
         word: &ast::DefaultComplexWord,
+        text: &str,
     ) -> Option<String> {
         match word {
-            ast::ComplexWord::Single(word) => self.handle_single(shell, word),
+            ast::ComplexWord::Single(word) => Self::handle_single(shell, word, text),
             ast::ComplexWord::Concat(words) => Some(
                 words
                     .iter()
-                    .filter_map(|w| self.handle_single(shell, w))
+                    .filter_map(|w| Self::handle_single(shell, w, text))
                     .collect::<Vec<_>>()
                     .join(""),
             ),
         }
     }
 
-    fn handle_single(&self, shell: &mut Shell, word: &ast::DefaultWord) -> Option<String> {
+    fn handle_single(shell: &mut Shell, word: &ast::DefaultWord, text: &str) -> Option<String> {
         match &word {
             ast::Word::SingleQuoted(w) => Some(w.clone()),
-            ast::Word::Simple(w) => self.handle_simple_word(shell, w),
+            ast::Word::Simple(w) => Self::handle_simple_word(shell, text, w),
             ast::Word::DoubleQuoted(words) => Some(
                 words
                     .iter()
-                    .filter_map(|w| self.handle_simple_word(shell, w))
+                    .filter_map(|w| Self::handle_simple_word(shell, text, w))
                     .collect::<Vec<_>>()
                     .join(""),
             ),
@@ -862,8 +955,11 @@ impl<'a> InputInterpreter<'a> {
     }
 
     fn handle_simple_word(
-        &self,
         shell: &mut Shell,
+        #[cfg(target_os = "wasi")]
+        text: &str,
+        #[cfg(not(target_os = "wasi"))]
+        _text: &str,
         word: &ast::DefaultSimpleWord,
     ) -> Option<String> {
         match word {
@@ -889,9 +985,10 @@ impl<'a> InputInterpreter<'a> {
                     )
                     .unwrap();
 
-                    self.handle_compound_subshell(
+                    Self::handle_compound_subshell(
                         shell,
                         cmd,
+                        text,
                         start,
                         end,
                         false,

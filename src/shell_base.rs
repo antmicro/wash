@@ -16,6 +16,7 @@ use std::fs::{File, OpenOptions};
 use std::io;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::io::{Error, ErrorKind};
+use std::iter;
 #[cfg(target_os = "wasi")]
 use std::mem;
 #[cfg(not(target_os = "wasi"))]
@@ -578,12 +579,17 @@ impl Shell {
             )
     }
 
-    pub fn run_command(&mut self, command: &str) -> Result<i32, Report> {
-        self.handle_input(command)
+    pub fn run_commands(&mut self, reader: impl io::Read) -> Result<i32, Report> {
+        self.handle_input(
+            io::BufReader::new(reader)
+                .lines()
+                .map_while(Result::ok)
+                .flat_map(|line| line.chars().chain(iter::once('\n')).collect::<Vec<char>>()),
+        )
     }
 
-    pub fn run_script(&mut self, script_name: impl Into<PathBuf>) -> Result<i32, Report> {
-        self.handle_input(&fs::read_to_string(script_name.into()).unwrap())
+    pub fn run_command(&mut self, command: &str) -> Result<i32, Report> {
+        self.handle_input(command.chars())
     }
 
     fn get_line(&mut self, input: &mut String) -> Result<bool, Report> {
@@ -696,7 +702,8 @@ impl Shell {
             }
         };
         if PathBuf::from(&washrc_path).exists() {
-            self.run_script(washrc_path).unwrap();
+            self.run_commands(BufReader::new(fs::File::open(washrc_path).unwrap()))
+                .unwrap();
         }
 
         let motd_path = PathBuf::from("/etc/motd");
@@ -731,7 +738,7 @@ impl Shell {
                         self.restore_default_mode()?;
                     }
 
-                    if let Err(error) = self.handle_input(&input) {
+                    if let Err(error) = self.handle_input(input.chars()) {
                         eprintln!("{error:#?}");
                     };
 
@@ -764,9 +771,9 @@ impl Shell {
         }
     }
 
-    fn handle_input(&mut self, input: &str) -> Result<i32, Report> {
+    fn handle_input<I: Iterator<Item = char>>(&mut self, input: I) -> Result<i32, Report> {
         // TODO: define and use constructor
-        let mut interpreter = InputInterpreter::from_input(input);
+        let mut interpreter = InputInterpreter::new(input);
         Ok(interpreter.interpret(self))
     }
 
