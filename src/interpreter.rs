@@ -10,6 +10,10 @@ use std::env;
 use std::fs;
 #[cfg(target_os = "wasi")]
 use std::fs::OpenOptions;
+#[cfg(target_os = "wasi")]
+use std::io::Read;
+#[cfg(target_os = "wasi")]
+use std::os::fd::AsRawFd;
 use std::os::fd::IntoRawFd;
 #[cfg(target_os = "wasi")]
 use std::path::Path;
@@ -724,15 +728,12 @@ impl<'a> InputInterpreter<'a> {
 
     fn handle_redirect_type(
         &self,
-        shell: &Shell,
+        shell: &mut Shell,
         redirect_type: &ast::Redirect<ast::TopLevelWord<String>>,
     ) -> Option<Redirect> {
-        let get_absolute_path = |filename: String| {
+        let get_absolute_path = |filename: String, sh: &Shell| {
             if !filename.starts_with('/') {
-                PathBuf::from(&shell.pwd)
-                    .join(&filename)
-                    .display()
-                    .to_string()
+                PathBuf::from(&sh.pwd).join(&filename).display().to_string()
             } else {
                 filename
             }
@@ -743,7 +744,7 @@ impl<'a> InputInterpreter<'a> {
                 // TODO: check noclobber option is set
                 let file_descriptor = file_descriptor.map_or_else(|| STDOUT, |fd| fd as Fd);
                 if let Some(mut filename) = self.handle_top_level_word(shell, top_level_word) {
-                    filename = get_absolute_path(filename);
+                    filename = get_absolute_path(filename, shell);
                     Some(Redirect::Write(file_descriptor, filename))
                 } else {
                     None
@@ -752,7 +753,7 @@ impl<'a> InputInterpreter<'a> {
             ast::Redirect::Append(file_descriptor, top_level_word) => {
                 let file_descriptor = file_descriptor.map_or_else(|| STDOUT, |fd| fd as Fd);
                 if let Some(mut filename) = self.handle_top_level_word(shell, top_level_word) {
-                    filename = get_absolute_path(filename);
+                    filename = get_absolute_path(filename, shell);
                     Some(Redirect::Append(file_descriptor, filename))
                 } else {
                     None
@@ -761,7 +762,7 @@ impl<'a> InputInterpreter<'a> {
             ast::Redirect::Read(file_descriptor, top_level_word) => {
                 let file_descriptor = file_descriptor.map_or_else(|| STDIN, |fd| fd as Fd);
                 if let Some(mut filename) = self.handle_top_level_word(shell, top_level_word) {
-                    filename = get_absolute_path(filename);
+                    filename = get_absolute_path(filename, shell);
                     Some(Redirect::Read(file_descriptor, filename))
                 } else {
                     None
@@ -770,7 +771,7 @@ impl<'a> InputInterpreter<'a> {
             ast::Redirect::ReadWrite(file_descriptor, top_level_word) => {
                 let file_descriptor = file_descriptor.map_or_else(|| STDIN, |fd| fd as Fd);
                 if let Some(mut filename) = self.handle_top_level_word(shell, top_level_word) {
-                    filename = get_absolute_path(filename);
+                    filename = get_absolute_path(filename, shell);
                     Some(Redirect::ReadWrite(file_descriptor, filename))
                 } else {
                     None
@@ -779,7 +780,7 @@ impl<'a> InputInterpreter<'a> {
             ast::Redirect::Clobber(file_descriptor, top_level_word) => {
                 let file_descriptor = file_descriptor.map_or_else(|| STDOUT, |fd| fd as Fd);
                 if let Some(mut filename) = self.handle_top_level_word(shell, top_level_word) {
-                    filename = get_absolute_path(filename);
+                    filename = get_absolute_path(filename, shell);
                     Some(Redirect::Write(file_descriptor, filename))
                 } else {
                     None
@@ -831,7 +832,7 @@ impl<'a> InputInterpreter<'a> {
 
     fn handle_top_level_word(
         &self,
-        shell: &Shell,
+        shell: &mut Shell,
         word: &ast::DefaultComplexWord,
     ) -> Option<String> {
         match word {
@@ -846,7 +847,7 @@ impl<'a> InputInterpreter<'a> {
         }
     }
 
-    fn handle_single(&self, shell: &Shell, word: &ast::DefaultWord) -> Option<String> {
+    fn handle_single(&self, shell: &mut Shell, word: &ast::DefaultWord) -> Option<String> {
         match &word {
             ast::Word::SingleQuoted(w) => Some(w.clone()),
             ast::Word::Simple(w) => self.handle_simple_word(shell, w),
@@ -860,11 +861,53 @@ impl<'a> InputInterpreter<'a> {
         }
     }
 
-    fn handle_simple_word(&self, shell: &Shell, word: &ast::DefaultSimpleWord) -> Option<String> {
+    fn handle_simple_word(
+        &self,
+        shell: &mut Shell,
+        word: &ast::DefaultSimpleWord,
+    ) -> Option<String> {
         match word {
             ast::SimpleWord::Literal(w) => Some(w.clone()),
             ast::SimpleWord::Colon => Some(":".to_string()),
             ast::SimpleWord::Tilde => Some(env::var("HOME").unwrap()),
+            #[cfg(target_os = "wasi")]
+            ast::SimpleWord::Subst(c) => match (*c).as_ref() {
+                ast::ParameterSubstitution::Command(cmd, (start, end)) => {
+                    let subshell_pipe_path =
+                        format!("/dev/subshell_pipe.{}", wasi_ext_lib::getpid().unwrap_or(0));
+                    wasi_ext_lib::mknod(&subshell_pipe_path, -1).unwrap();
+
+                    let mut one = 1;
+                    let mut subshell_pipe = fs::OpenOptions::new()
+                        .read(true)
+                        .open(&subshell_pipe_path)
+                        .unwrap();
+                    wasi_ext_lib::ioctl(
+                        subshell_pipe.as_raw_fd(),
+                        wasi_ext_lib::FIFOSCLOSERM,
+                        Some(&mut one),
+                    )
+                    .unwrap();
+
+                    self.handle_compound_subshell(
+                        shell,
+                        cmd,
+                        start,
+                        end,
+                        false,
+                        &[Redirect::Write(1, subshell_pipe_path.to_string())],
+                    );
+
+                    let mut data = String::new();
+                    subshell_pipe.read_to_string(&mut data).unwrap();
+                    if data.ends_with('\n') {
+                        data.pop();
+                    }
+
+                    Some(data)
+                }
+                _ => todo!(),
+            },
             ast::SimpleWord::Param(p) => match p {
                 ast::Parameter::Bang => shell.last_job_pid.map(|pid| pid.to_string()),
                 ast::Parameter::Var(key) => {
