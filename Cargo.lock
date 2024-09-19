@@ -244,7 +244,7 @@ dependencies = [
 [[package]]
 name = "conch-parser"
 version = "0.1.1"
-source = "git+https://github.com/antmicro/conch-parser.git?branch=master#d0765a37838f00be37dd1d9158cbed1a56f91a29"
+source = "git+https://github.com/antmicro/conch-parser.git?branch=master#7f8d08dc32bb588ad759691ee26b01b405a5f196"
 dependencies = [
  "void",
 ]
@@ -724,7 +724,7 @@ checksum = "9c8d87e72b64a3b4db28d11ce29237c246188f4f51057d65a7eab63b7987e423"
 [[package]]
 name = "wasi_ext_lib"
 version = "0.1.0"
-source = "git+https://github.com/antmicro/wasi_ext_lib.git?branch=main#51757050630d302c120d0371b820bed71db15396"
+source = "git+https://github.com/antmicro/wasi_ext_lib.git?branch=main#1841ae45097606b82bc007ab124c317bd4baa08d"
 dependencies = [
  "bindgen",
  "wasi",
