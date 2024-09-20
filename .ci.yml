@@ -1,0 +1,4 @@
+include:
+  - project: repositories/jswasi-ci
+    ref: main
+    file: ci/wash.yml
