@@ -856,7 +856,7 @@ impl<'a> InputInterpreter<'a> {
                     .iter()
                     .filter_map(|w| self.handle_simple_word(shell, w))
                     .collect::<Vec<_>>()
-                    .join(" "),
+                    .join(""),
             ),
         }
     }
@@ -908,6 +908,7 @@ impl<'a> InputInterpreter<'a> {
                 }
                 _ => todo!(),
             },
+            ast::SimpleWord::Escaped(w) => Some(w.replace('\\', "")),
             ast::SimpleWord::Param(p) => match p {
                 ast::Parameter::Bang => shell.last_job_pid.map(|pid| pid.to_string()),
                 ast::Parameter::Var(key) => {
@@ -965,6 +966,7 @@ impl<'a> InputInterpreter<'a> {
             ast::SimpleWord::Question => Some("?".to_string()),
             ast::SimpleWord::SquareOpen => Some("[".to_string()),
             ast::SimpleWord::SquareClose => Some("]".to_string()),
+            #[cfg(not(target_os = "wasi"))]
             any => {
                 eprintln!("simple word not handled: {any:?}");
                 None
