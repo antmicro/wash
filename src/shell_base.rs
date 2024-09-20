@@ -550,7 +550,10 @@ impl Shell {
             {
                 if let Ok(name) = nix::sys::utsname::uname() {
                     return unsafe {
-                        String::from_utf8_lossy(std::mem::transmute(name.nodename())).into_owned()
+                        String::from_utf8_lossy(std::mem::transmute::<&std::ffi::OsStr, &[u8]>(
+                            name.nodename(),
+                        ))
+                        .into_owned()
                     };
                 }
             }
