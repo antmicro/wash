@@ -50,18 +50,26 @@ use crate::shell_base::{apply_redirects, wait_for_child};
 
 use crate::saved_fd::SavedFd;
 
-struct CachingIterator<I: Iterator> {
-    iter: I,
+pub type ParsedCommand = (
+    String,
+    ParseResult<
+        <DefaultBuilder<String> as Builder>::Command,
+        <DefaultBuilder<String> as Builder>::Error,
+    >,
+);
+
+struct CachingIterator<'a, I: Iterator> {
+    iter: &'a mut I,
     cache: Rc<RefCell<Vec<I::Item>>>,
 }
 
-impl<I: Iterator> CachingIterator<I> {
-    pub fn new(iter: I, cache: Rc<RefCell<Vec<I::Item>>>) -> Self {
+impl<'a, I: Iterator> CachingIterator<'a, I> {
+    pub fn new(iter: &'a mut I, cache: Rc<RefCell<Vec<I::Item>>>) -> Self {
         Self { iter, cache }
     }
 }
 
-impl<I> Iterator for CachingIterator<I>
+impl<'a, I> Iterator for CachingIterator<'a, I>
 where
     I: Iterator,
     I::Item: Clone,
@@ -78,16 +86,13 @@ where
     }
 }
 
-struct CommandIterator<I>
-where
-    I: Iterator<Item = char>,
-{
-    parser: ParserIterator<Lexer<CachingIterator<I>>, DefaultBuilder<String>>,
+pub(crate) struct CommandIterator<'a, I: Iterator<Item = char>> {
+    parser: ParserIterator<Lexer<CachingIterator<'a, I>>, DefaultBuilder<String>>,
     cache: Rc<RefCell<Vec<I::Item>>>,
 }
 
-impl<I: Iterator<Item = char>> CommandIterator<I> {
-    pub fn new(input: I) -> Self {
+impl<'a, I: Iterator<Item = char>> CommandIterator<'a, I> {
+    pub fn new(input: &'a mut I) -> Self {
         let cache_vec: Rc<RefCell<Vec<char>>> = Rc::new(RefCell::new(vec![]));
         Self {
             parser: DefaultParser::new(Lexer::new(CachingIterator::new(
@@ -100,14 +105,8 @@ impl<I: Iterator<Item = char>> CommandIterator<I> {
     }
 }
 
-impl<I: Iterator<Item = char>> Iterator for CommandIterator<I> {
-    type Item = (
-        String,
-        ParseResult<
-            <DefaultBuilder<String> as Builder>::Command,
-            <DefaultBuilder<String> as Builder>::Error,
-        >,
-    );
+impl<'a, I: Iterator<Item = char>> Iterator for CommandIterator<'a, I> {
+    type Item = ParsedCommand;
 
     fn next(&mut self) -> Option<Self::Item> {
         if let Some(cmd) = self.parser.next() {
@@ -118,52 +117,57 @@ impl<I: Iterator<Item = char>> Iterator for CommandIterator<I> {
     }
 }
 
-pub struct InputInterpreter<I: Iterator<Item = char>> {
-    cmd_iter: CommandIterator<I>,
+pub struct InputInterpreter<'a, I: Iterator<Item = char>> {
+    cmd_iter: CommandIterator<'a, I>,
 }
 
-impl<I: std::iter::Iterator<Item = char>> InputInterpreter<I> {
-    pub fn new(iter: I) -> Self {
+impl<'a, I: std::iter::Iterator<Item = char>> InputInterpreter<'a, I> {
+    pub fn new(iter: &'a mut I) -> Self {
         Self {
             cmd_iter: CommandIterator::new(iter),
+        }
+    }
+
+    pub fn execute_command(shell: &mut Shell, comm: &ParsedCommand) -> i32 {
+        let (text, cmd) = comm;
+        match cmd {
+            Ok(cmd) => Self::handle_top_level_command(shell, cmd, text),
+            Err(e) => {
+                let err_msg = match e {
+                    /*
+                    TODO: Most of these errors will never occur due to
+                    unimplemented shell features so error messages are
+                    kind of general.
+                    */
+                    ParseError::BadFd(pos_start, pos_end) => {
+                        let idx_start = pos_start.byte;
+                        let idx_end = pos_end.byte;
+                        format!("{}: ambiguous redirect", &text[idx_start..idx_end])
+                    }
+                    ParseError::BadIdent(_, _) => "bad idenftifier".to_string(),
+                    ParseError::BadSubst(_, _) => "bad substitution".to_string(),
+                    ParseError::Unmatched(_, _) => "unmached expression".to_string(),
+                    ParseError::IncompleteCmd(_, _, _, _) => {
+                        format!("incomplete command {}", text)
+                    }
+                    ParseError::Unexpected(_, _) => "unexpected token".to_string(),
+                    ParseError::UnexpectedEOF => "unexpected end of file".to_string(),
+                    ParseError::Custom(t) => {
+                        format!("custom AST error: {t:?}")
+                    }
+                };
+                eprintln!("{}: {}", env!("CARGO_PKG_NAME"), err_msg);
+                shell.last_exit_status = EXIT_FAILURE;
+                EXIT_FAILURE
+            }
         }
     }
 
     pub fn interpret(&mut self, shell: &mut Shell) -> i32 {
         let mut exit_status = EXIT_SUCCESS;
 
-        let _ = &mut self.cmd_iter.try_for_each(|(text, cmd)| {
-            exit_status = match cmd {
-                Ok(cmd) => Self::handle_top_level_command(shell, &cmd, &text),
-                Err(e) => {
-                    let err_msg = match e {
-                        /*
-                        TODO: Most of these errors will never occur due to
-                        unimplemented shell features so error messages are
-                        kind of general.
-                        */
-                        ParseError::BadFd(pos_start, pos_end) => {
-                            let idx_start = pos_start.byte;
-                            let idx_end = pos_end.byte;
-                            format!("{}: ambiguous redirect", &text[idx_start..idx_end])
-                        }
-                        ParseError::BadIdent(_, _) => "bad idenftifier".to_string(),
-                        ParseError::BadSubst(_, _) => "bad substitution".to_string(),
-                        ParseError::Unmatched(_, _) => "unmached expression".to_string(),
-                        ParseError::IncompleteCmd(_, _, _, _) => {
-                            format!("incomplete command {}", text)
-                        }
-                        ParseError::Unexpected(_, _) => "unexpected token".to_string(),
-                        ParseError::UnexpectedEOF => "unexpected end of file".to_string(),
-                        ParseError::Custom(t) => {
-                            format!("custom AST error: {t:?}")
-                        }
-                    };
-                    eprintln!("{}: {}", env!("CARGO_PKG_NAME"), err_msg);
-                    shell.last_exit_status = EXIT_FAILURE;
-                    EXIT_FAILURE
-                }
-            };
+        let _ = &mut self.cmd_iter.try_for_each(|comm| {
+            exit_status = Self::execute_command(shell, &comm);
             if exit_status == EXIT_INTERRUPTED {
                 Err(())
             } else {
@@ -956,8 +960,10 @@ impl<I: std::iter::Iterator<Item = char>> InputInterpreter<I> {
 
     fn handle_simple_word(
         shell: &mut Shell,
+        #[allow(unused_variables)]
         #[cfg(target_os = "wasi")]
         text: &str,
+        #[allow(unused_variables)]
         #[cfg(not(target_os = "wasi"))]
         _text: &str,
         word: &ast::DefaultSimpleWord,

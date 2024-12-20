@@ -5,36 +5,29 @@
  */
 
 use color_eyre::Report;
-use lazy_static::lazy_static;
 #[cfg(not(target_os = "wasi"))]
 use nix;
-use regex::Regex;
 use std::collections::{HashMap, VecDeque};
-use std::env;
-use std::fs;
 use std::fs::{File, OpenOptions};
-use std::io;
-use std::io::{BufRead, BufReader, Read, Write};
+use std::io::{BufRead, BufReader, Write};
 use std::io::{Error, ErrorKind};
-use std::iter;
 #[cfg(target_os = "wasi")]
-use std::mem;
+use std::os::fd::AsRawFd;
 #[cfg(not(target_os = "wasi"))]
 use std::os::fd::IntoRawFd;
-#[cfg(target_os = "wasi")]
-use std::os::wasi::io::{AsRawFd, FromRawFd};
 use std::path::{Path, PathBuf};
+use std::{env, fs, io, iter};
 #[cfg(target_os = "wasi")]
 use wasi;
 
 #[cfg(target_os = "wasi")]
 use wasi_ext_lib::termios;
 
-use vte::Parser;
-
-use crate::cli::Cli;
+#[cfg(target_os = "wasi")]
+use crate::cli::event_source::InternalEventSource;
+use crate::cli::{Cli, CliChars, InternalReader, StdinEvent};
 use crate::internals::INTERNALS_MAP;
-use crate::interpreter::InputInterpreter;
+use crate::interpreter::{CommandIterator, InputInterpreter, ParsedCommand};
 use crate::output_device::OutputDevice;
 
 #[cfg(target_os = "wasi")]
@@ -52,12 +45,6 @@ pub const STDIN: Fd = 0;
 pub const STDOUT: Fd = 1;
 pub const STDERR: Fd = 2;
 pub const CLEAR_ESCAPE_CODE: &str = "\x1b[2J\x1b[H";
-
-enum HistoryExpansion {
-    Expanded(String),
-    EventNotFound(String),
-    Unchanged,
-}
 
 #[cfg(target_os = "wasi")]
 pub type Redirect = wasi_ext_lib::Redirect;
@@ -361,144 +348,6 @@ pub fn path_exists(path: &str) -> io::Result<bool> {
     })
 }
 
-#[cfg(target_os = "wasi")]
-struct InternalEventSource {
-    subs: [wasi::Subscription; 2],
-    events: [wasi::Event; 2],
-    tty_input: File,
-    event_src: File,
-}
-
-#[cfg(target_os = "wasi")]
-impl InternalEventSource {
-    const TTY_TOKEN: u64 = 1;
-    const SIGINT_TOKEN: u64 = 2;
-
-    pub fn read_byte(&mut self) -> Result<Option<u8>, Report> {
-        // subscribe and wait
-        let mut byte: [u8; 1] = [0];
-        let result = unsafe {
-            wasi::poll_oneoff(
-                self.subs.as_ptr(),
-                self.events.as_mut_ptr(),
-                self.subs.len(),
-            )
-        };
-
-        let events_count = match result {
-            Ok(n) => n,
-            Err(e) => {
-                return Err(Report::msg(format!(
-                    "Poll_oneoff returned non zero code = {e}!"
-                )));
-            }
-        };
-
-        for event in self.events[0..events_count].iter() {
-            let errno = event.error.raw();
-            if errno > 0 {
-                return Err(Report::msg("Poll_oneoff returned non zero code for event!"));
-            }
-        }
-
-        for event in self.events[0..events_count].iter() {
-            match (event.userdata, event.type_) {
-                (Self::TTY_TOKEN, wasi::EVENTTYPE_FD_READ) => {
-                    self.tty_input.read_exact(&mut byte)?
-                }
-                (Self::SIGINT_TOKEN, wasi::EVENTTYPE_FD_READ) => {
-                    let mut read_buff: [u8; wasi_ext_lib::WASI_EVENTS_MASK_SIZE] =
-                        [0u8; wasi_ext_lib::WASI_EVENTS_MASK_SIZE];
-
-                    self.event_src.read_exact(&mut read_buff)?;
-
-                    let events = u32::from_le_bytes(read_buff) as wasi_ext_lib::WasiEvents;
-
-                    if events & wasi_ext_lib::WASI_EVENT_SIGINT != 0 {
-                        return Ok(None);
-                    } else {
-                        return Err(Report::msg(
-                            "Event_source did not return subsribed SigInt event!",
-                        ));
-                    }
-                }
-                _ => unreachable!(),
-            }
-        }
-
-        Ok(Some(byte[0]))
-    }
-}
-
-#[cfg(target_os = "wasi")]
-impl Default for InternalEventSource {
-    fn default() -> Self {
-        let input_fd = STDIN as i32;
-
-        if !wasi_ext_lib::isatty(input_fd).unwrap() {
-            panic!("Input is not TTY!");
-        }
-
-        let event_source_fd = match wasi_ext_lib::event_source_fd(wasi_ext_lib::WASI_EVENT_SIGINT) {
-            Ok(fd) => fd,
-            Err(err) => {
-                panic!("Cannot obtain event_source_fd, error code: {}", err);
-            }
-        };
-
-        InternalEventSource {
-            subs: [
-                wasi::Subscription {
-                    userdata: Self::TTY_TOKEN,
-                    u: wasi::SubscriptionU {
-                        tag: wasi::EVENTTYPE_FD_READ.raw(),
-                        u: wasi::SubscriptionUU {
-                            fd_read: wasi::SubscriptionFdReadwrite {
-                                file_descriptor: input_fd as u32,
-                            },
-                        },
-                    },
-                },
-                wasi::Subscription {
-                    userdata: Self::SIGINT_TOKEN,
-                    u: wasi::SubscriptionU {
-                        tag: wasi::EVENTTYPE_FD_READ.raw(),
-                        u: wasi::SubscriptionUU {
-                            fd_read: wasi::SubscriptionFdReadwrite {
-                                file_descriptor: event_source_fd as u32,
-                            },
-                        },
-                    },
-                },
-            ],
-            events: unsafe { mem::zeroed() },
-            tty_input: unsafe { File::from_raw_fd(input_fd) },
-            event_src: unsafe { File::from_raw_fd(event_source_fd) },
-        }
-    }
-}
-
-enum InternalReader {
-    #[cfg(target_os = "wasi")]
-    StdinWithSigInt(InternalEventSource),
-    OnlyStdin,
-}
-
-impl InternalReader {
-    fn read_byte(&mut self) -> Result<Option<u8>, Report> {
-        match self {
-            #[cfg(target_os = "wasi")]
-            InternalReader::StdinWithSigInt(reader) => reader.read_byte(),
-            InternalReader::OnlyStdin => {
-                let mut buffer: [u8; 1] = [0];
-                io::stdin().read_exact(&mut buffer)?;
-
-                Ok(Some(buffer[0]))
-            }
-        }
-    }
-}
-
 pub struct Shell {
     pub pwd: PathBuf,
     pub vars: HashMap<String, String>,
@@ -509,7 +358,6 @@ pub struct Shell {
 
     history_path: PathBuf,
     termios_mode: Option<Termios>,
-    reader: InternalReader,
 }
 
 impl Shell {
@@ -534,8 +382,7 @@ impl Shell {
             last_exit_status: EXIT_SUCCESS,
             last_job_pid: None,
             termios_mode: None,
-            reader: InternalReader::OnlyStdin,
-            cli: Cli::new(should_echo),
+            cli: Cli::new(should_echo, InternalReader::OnlyStdin),
         }
     }
 
@@ -579,96 +426,25 @@ impl Shell {
             )
     }
 
+    pub fn run_command(&mut self, command: &str) -> Result<i32, Report> {
+        Ok(InputInterpreter::new(&mut command.chars()).interpret(self))
+    }
+
+    pub fn run_script(&mut self, script_name: impl Into<PathBuf>) -> Result<i32, Report> {
+        Ok(
+            InputInterpreter::new(&mut fs::read_to_string(script_name.into())?.chars())
+                .interpret(self),
+        )
+    }
+
     pub fn run_commands(&mut self, reader: impl io::Read) -> Result<i32, Report> {
-        self.handle_input(
-            io::BufReader::new(reader)
+        Ok(InputInterpreter::new(
+            &mut io::BufReader::new(reader)
                 .lines()
                 .map_while(Result::ok)
                 .flat_map(|line| line.chars().chain(iter::once('\n')).collect::<Vec<char>>()),
         )
-    }
-
-    pub fn run_command(&mut self, command: &str) -> Result<i32, Report> {
-        self.handle_input(command.chars())
-    }
-
-    fn get_line(&mut self, input: &mut String) -> Result<bool, Report> {
-        let mut vt_parser = Parser::new();
-        self.cli.reset();
-
-        while !self.cli.is_input_ready() {
-            match self.reader.read_byte()? {
-                Some(byte) => vt_parser.advance(&mut self.cli, byte),
-                None => return Ok(false),
-            }
-        }
-
-        *input = self.cli.input.iter().collect::<String>().trim().to_string();
-        Ok(true)
-    }
-
-    /// Expands input line with history expansion.
-    fn history_expansion(&mut self, input: &str) -> HistoryExpansion {
-        let mut processed = input.to_string();
-        if let Some(last_command) = self.cli.history.last() {
-            processed = processed.replace("!!", &last_command.iter().collect::<String>());
-        }
-        // for eg. "!12", "!-2"
-        lazy_static! {
-            static ref NUMBER_RE: Regex = Regex::new(r"(?:^|[^\[])!(-?\d+)").unwrap();
-        }
-        // for each match
-        for captures in NUMBER_RE.captures_iter(input) {
-            // get matched number
-            let full_match = captures.get(0).unwrap().as_str();
-            let group_match = captures.get(1).unwrap().as_str();
-            let history_number = group_match.parse::<i32>().unwrap();
-            let history_number = if history_number < 0 {
-                (self.cli.history.len() as i32 + history_number) as usize
-            } else {
-                (history_number - 1) as usize
-            };
-            // get that entry from history (if it exists)
-            if let Some(history_cmd) = self.cli.history.get(history_number) {
-                // replace the match with the entry from history
-                processed = processed.replace(full_match, &history_cmd.iter().collect::<String>());
-            } else {
-                return HistoryExpansion::EventNotFound(full_match.into());
-            }
-        }
-
-        // $ for eg. "!ls"
-        lazy_static! {
-            static ref STRING_RE: Regex = Regex::new(r"(?:^|[^\[])!(\w+)").unwrap();
-        }
-        // for each match
-        // TODO: Clippy warns about redundant clone here, removing it produces errors
-        // find out if there is a better solution that would satisfy Clippy
-        #[allow(clippy::redundant_clone)]
-        for captures in STRING_RE.captures_iter(&processed.clone()) {
-            let full_match = captures.get(0).unwrap().as_str();
-            let group_match = captures.get(1).unwrap().as_str();
-
-            // find history entry starting with the match
-            if let Some(history_cmd) = self
-                .cli
-                .history
-                .iter()
-                .rev()
-                .find(|entry| entry.starts_with(&group_match.chars().collect::<Vec<char>>()))
-            {
-                // replace the match with the entry from history
-                processed = processed.replace(full_match, &history_cmd.iter().collect::<String>());
-            } else {
-                return HistoryExpansion::EventNotFound(full_match.into());
-            }
-        }
-
-        if input == processed {
-            HistoryExpansion::Unchanged
-        } else {
-            HistoryExpansion::Expanded(processed)
-        }
+        .interpret(self))
     }
 
     pub fn run_interpreter(&mut self) -> Result<i32, Report> {
@@ -702,8 +478,7 @@ impl Shell {
             }
         };
         if PathBuf::from(&washrc_path).exists() {
-            self.run_commands(BufReader::new(fs::File::open(washrc_path).unwrap()))
-                .unwrap();
+            self.run_script(washrc_path).unwrap();
         }
 
         let motd_path = PathBuf::from("/etc/motd");
@@ -711,52 +486,68 @@ impl Shell {
             println!("{}", fs::read_to_string(motd_path).unwrap());
         }
 
-        let mut input = String::new();
         // line loop
         loop {
-            self.print_prompt(&input);
-            if !self.get_line(&mut input)? {
-                self.last_exit_status = EXIT_INTERRUPTED;
-                input.clear();
-                println!();
+            self.print_prompt("");
+            let mut char_iter = CliChars::new(&mut self.cli);
+            let common_state = char_iter.get_common_state();
+            let comms = CommandIterator::new(&mut char_iter)
+                .inspect(|_| {
+                    common_state.borrow_mut().stop();
+                })
+                .collect::<Vec<ParsedCommand>>();
+
+            if let Some(ev) = &common_state.borrow().last_event {
+                match ev {
+                    Err(e) => {
+                        eprintln!("{:?}", e);
+                        self.last_exit_status = EXIT_FAILURE;
+                        continue;
+                    }
+                    Ok(StdinEvent::SigInt) => {
+                        self.last_exit_status = EXIT_INTERRUPTED;
+                        println!();
+                        continue;
+                    }
+                    _ => {}
+                }
             }
 
-            if input.is_empty() {
+            let comm_str = if let Some((c, _)) = comms.last() {
+                c
+            } else {
                 continue;
-            }
-
-            match self.history_expansion(&input) {
-                HistoryExpansion::Expanded(expanded) => {
-                    input = expanded;
-                    continue;
+            };
+            for comm in comms.iter() {
+                if let Ok(true) = is_fd_tty(STDIN) {
+                    self.restore_default_mode()?;
                 }
-                HistoryExpansion::EventNotFound(event) => {
-                    eprintln!("{event}: event not found");
+                InputInterpreter::<CliChars>::execute_command(self, comm);
+                if let Ok(true) = is_fd_tty(STDIN) {
+                    self.enable_interpreter_mode()?;
                 }
-                HistoryExpansion::Unchanged => {
-                    if let Ok(true) = is_fd_tty(STDIN) {
-                        self.restore_default_mode()?;
-                    }
 
-                    if let Err(error) = self.handle_input(input.chars()) {
-                        eprintln!("{error:#?}");
-                    };
-
-                    if let Ok(true) = is_fd_tty(STDIN) {
-                        self.enable_interpreter_mode()?;
-                    }
+                if self.last_exit_status == EXIT_INTERRUPTED {
+                    break;
                 }
             }
+
             match OpenOptions::new()
                 .create(true)
                 .append(true)
                 .open(&self.history_path)
             {
                 Ok(mut file) => {
-                    let vectored_input = input.chars().collect::<Vec<char>>();
+                    let vectored_input = if comm_str.ends_with('\n') {
+                        &comm_str[..comm_str.len() - 1]
+                    } else {
+                        comm_str.as_str()
+                    }
+                    .chars()
+                    .collect::<Vec<char>>();
                     if Some(&vectored_input) != self.cli.history.last() {
                         self.cli.history.push(vectored_input);
-                        writeln!(file, "{}", &input).unwrap();
+                        writeln!(file, "{}", &comm_str).unwrap();
                     }
                 }
                 Err(error) => {
@@ -767,14 +558,7 @@ impl Shell {
                     );
                 }
             };
-            input.clear();
         }
-    }
-
-    fn handle_input<I: Iterator<Item = char>>(&mut self, input: I) -> Result<i32, Report> {
-        // TODO: define and use constructor
-        let mut interpreter = InputInterpreter::new(input);
-        Ok(interpreter.interpret(self))
     }
 
     pub fn execute_command(
@@ -972,12 +756,12 @@ impl Shell {
     #[cfg(target_os = "wasi")]
     pub fn register_sigint(&mut self) -> Result<(), Report> {
         let event_source = InternalEventSource::default();
-        if let Err(e) = wasi_ext_lib::attach_sigint(event_source.event_src.as_raw_fd()) {
+        if let Err(e) = wasi_ext_lib::attach_sigint(event_source.as_raw_fd()) {
             Err(Report::msg(format!(
                 "Cannot attach SigInt event descriptor, error code = {e}!"
             )))
         } else {
-            self.reader = InternalReader::StdinWithSigInt(event_source);
+            self.cli.internal_reader = InternalReader::StdinWithSigInt(event_source);
             Ok(())
         }
     }

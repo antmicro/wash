@@ -7,7 +7,6 @@
 use std::collections::HashMap;
 use std::env;
 use std::fs;
-use std::io::BufReader;
 use std::path::PathBuf;
 
 use color_eyre::Report;
@@ -231,7 +230,7 @@ fn source(
     output_device: &mut OutputDevice,
 ) -> Result<i32, Report> {
     if let Some(filename) = args.first() {
-        let _ = shell.run_commands(BufReader::new(fs::File::open(filename).unwrap()));
+        let _ = shell.run_script(filename);
         Ok(EXIT_SUCCESS)
     } else {
         output_device.eprintln("source: help: source <filename>");
