@@ -947,7 +947,6 @@ impl<'a, I: std::iter::Iterator<Item = char>> InputInterpreter<'a, I> {
     fn handle_single(shell: &mut Shell, word: &ast::DefaultWord, text: &str) -> Option<String> {
         match &word {
             ast::Word::SingleQuoted(w) => Some(w.clone()),
-            ast::Word::Simple(w) => Self::handle_simple_word(shell, text, w),
             ast::Word::DoubleQuoted(words) => Some(
                 words
                     .iter()
@@ -955,6 +954,18 @@ impl<'a, I: std::iter::Iterator<Item = char>> InputInterpreter<'a, I> {
                     .collect::<Vec<_>>()
                     .join(""),
             ),
+            ast::Word::Simple(w) => {
+                // non-quoted substitutions that resolve to empty strings should be ignored
+                if let Some(w_) = Self::handle_simple_word(shell, text, w) {
+                    if w_ == "" {
+                        None
+                    } else {
+                        Some(w_)
+                    }
+                } else {
+                    None
+                }
+            }
         }
     }
 
