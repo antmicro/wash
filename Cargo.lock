@@ -244,7 +244,7 @@ dependencies = [
 [[package]]
 name = "conch-parser"
 version = "0.1.1"
-source = "git+https://github.com/antmicro/conch-parser.git?branch=master#7f8d08dc32bb588ad759691ee26b01b405a5f196"
+source = "git+https://github.com/antmicro/conch-parser.git?branch=master#0e60609ca6b1e6e15b017cc350b7838b91f51875"
 dependencies = [
  "void",
 ]
