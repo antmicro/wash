@@ -1,6 +1,6 @@
 # Web Assembly SHell
 
-Copyright (c) 2022-2023 [Antmicro](https://www.antmicro.com)
+Copyright (c) 2022-2025 [Antmicro](https://www.antmicro.com)
 
 This repository contains a custom shell implementation that supports the `wasm32-wasi` target; with an extended set of system calls implemented by [wasi_ext_lib](https://github.com/antmicro/wasi_ext_lib).
 
