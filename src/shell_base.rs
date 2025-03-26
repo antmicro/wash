@@ -387,12 +387,12 @@ impl Shell {
     }
 
     fn print_prompt(&mut self, input: &str) {
-        print!("{}{}", self.parse_prompt_string(), input);
+        print!("{}{}", self.parse_prompt_string("PS1"), input);
         io::stdout().flush().unwrap();
         self.cli.cursor_position = input.len();
     }
 
-    fn parse_prompt_string(&self) -> String {
+    fn parse_prompt_string(&self, prompt_var: &str) -> String {
         fn get_hostname() -> String {
             #[cfg(not(target_os = "wasi"))]
             {
@@ -408,7 +408,7 @@ impl Shell {
             env::var("HOSTNAME").unwrap_or_else(|_| "hostname".to_string())
         }
 
-        env::var("PS1")
+        env::var(prompt_var)
             .unwrap_or_else(|_| "\x1b[1;34m\\u@\\h \x1b[1;33m\\w$\x1b[0m ".to_string())
             .replace(
                 "\\u",
@@ -489,7 +489,8 @@ impl Shell {
         // line loop
         loop {
             self.print_prompt("");
-            let mut char_iter = CliChars::new(&mut self.cli);
+            let ps2_prompt = self.parse_prompt_string("PS2");
+            let mut char_iter = CliChars::new(&mut self.cli, &ps2_prompt);
             let common_state = char_iter.get_common_state();
             let comms = CommandIterator::new(&mut char_iter)
                 .inspect(|_| {

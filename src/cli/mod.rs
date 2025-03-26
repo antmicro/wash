@@ -410,14 +410,18 @@ pub(crate) struct CliChars<'a> {
     cli: &'a mut Cli,
     last_line: VecDeque<char>,
     common_state: Rc<RefCell<CommonState>>,
+    print_ps2: bool,
+    ps2_prompt: &'a str,
 }
 
 impl<'a> CliChars<'a> {
-    pub fn new(cli: &'a mut Cli) -> Self {
+    pub fn new(cli: &'a mut Cli, ps2_prompt: &'a str) -> Self {
         Self {
             cli,
             common_state: Rc::new(RefCell::new(CommonState::default())),
             last_line: VecDeque::new(),
+            print_ps2: false,
+            ps2_prompt,
         }
     }
 
@@ -439,7 +443,11 @@ impl<'a> Iterator for CliChars<'a> {
             return None;
         }
 
+        if self.print_ps2 {
+            eprint!("{}", self.ps2_prompt);
+        }
         self.common_state.borrow_mut().last_event = if let Some(ev) = self.cli.next() {
+            self.print_ps2 = true;
             Some(ev)
         } else {
             return None;
