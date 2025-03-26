@@ -954,17 +954,9 @@ impl<'a, I: std::iter::Iterator<Item = char>> InputInterpreter<'a, I> {
                     .collect::<Vec<_>>()
                     .join(""),
             ),
+            // non-quoted substitutions that resolve to empty strings should be ignored
             ast::Word::Simple(w) => {
-                // non-quoted substitutions that resolve to empty strings should be ignored
-                if let Some(w_) = Self::handle_simple_word(shell, text, w) {
-                    if w_ == "" {
-                        None
-                    } else {
-                        Some(w_)
-                    }
-                } else {
-                    None
-                }
+                Self::handle_simple_word(shell, text, w).filter(|w_| !w_.is_empty())
             }
         }
     }
