@@ -146,7 +146,7 @@ impl<'a, I: std::iter::Iterator<Item = char>> InputInterpreter<'a, I> {
                     }
                     ParseError::BadIdent(_, _) => "bad idenftifier".to_string(),
                     ParseError::BadSubst(_, _) => "bad substitution".to_string(),
-                    ParseError::Unmatched(_, _) => "unmached expression".to_string(),
+                    ParseError::Unmatched(_, _) => "unmatched expression".to_string(),
                     ParseError::IncompleteCmd(_, _, _, _) => {
                         format!("incomplete command {}", text)
                     }
