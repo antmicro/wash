@@ -304,13 +304,9 @@ pub fn spawn(
                 .chain(env.iter().map(env_fmt))
                 .collect();
 
-            if let Err(err) =
-                nix::unistd::execve(cpath.as_c_str(), cargs.as_slice(), cenv.as_slice())
-            {
-                eprintln!("{}: {}", env!("CARGO_PKG_NAME"), err);
-                std::process::exit(EXIT_FAILURE);
-            }
-            unreachable!()
+            let Err(err) = nix::unistd::execve(cpath.as_c_str(), cargs.as_slice(), cenv.as_slice());
+            eprintln!("{}: {}", env!("CARGO_PKG_NAME"), err);
+            std::process::exit(EXIT_FAILURE);
         }
         Err(err) => {
             eprintln!("{}: {}", env!("CARGO_PKG_NAME"), err);
