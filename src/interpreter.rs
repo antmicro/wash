@@ -498,14 +498,9 @@ impl<'a, I: std::iter::Iterator<Item = char>> InputInterpreter<'a, I> {
         let subshell_cmds = &text[(start_pos.byte + 1)..(end_pos.byte)];
 
         let mut args_vec = vec!["-c".to_string(), subshell_cmds.to_string()];
+        let vars = shell.vars.clone();
 
-        match shell.execute_command(
-            "wash",
-            &mut args_vec,
-            &HashMap::new(),
-            background,
-            redirects,
-        ) {
+        match shell.execute_command("wash", &mut args_vec, &vars, background, redirects) {
             Ok(result) => result,
             Err(error) => {
                 eprintln!("{} error: {:?}", env!("CARGO_PKG_NAME"), error);
