@@ -7,6 +7,8 @@
 use color_eyre::Report;
 #[cfg(not(target_os = "wasi"))]
 use nix;
+#[cfg(not(target_os = "wasi"))]
+use nix::errno::Errno;
 use std::collections::{HashMap, VecDeque};
 use std::fs::{File, OpenOptions};
 use std::io::{BufRead, BufReader, Write};
@@ -19,6 +21,8 @@ use std::path::{Path, PathBuf};
 use std::{env, fs, io, iter};
 #[cfg(target_os = "wasi")]
 use wasi;
+#[cfg(target_os = "wasi")]
+use wasi::ERRNO_NOEXEC;
 
 #[cfg(target_os = "wasi")]
 use wasi_ext_lib::termios;
@@ -619,53 +623,63 @@ impl Shell {
 
             match full_path {
                 Ok(path) => {
-                    let reader_result = match File::open(&path) {
-                        Ok(file) => BufReader::new(file).lines().next(),
-                        Err(err) => {
-                            panic!("Cannot open executable: {}", err);
-                        }
-                    };
+                    args.insert(0, path.clone().into_os_string().into_string().unwrap());
+                    let args_: Vec<&str> = args.iter().map(|s| &**s).collect();
+                    match spawn(args_[0], &args_[1..], env, background, redirects) {
+                        // nonempty output message means that binary couldn't be executed
+                        Err(e) => {
+                            let mut exit_status = EXIT_FAILURE;
+                            let mut script_success = false;
 
-                    if let Some(Ok(line)) = reader_result {
-                        // file starts with valid UTF-8, most likely a script
-                        let binary_path = if let Some(path) = line.strip_prefix("#!") {
-                            path.trim().to_string()
-                        } else {
-                            env::var("SHELL").unwrap()
-                        };
-                        args.insert(0, binary_path);
-                        args.insert(1, path.into_os_string().into_string().unwrap());
-                        let args_: Vec<&str> = args.iter().map(|s| &**s).collect();
+                            #[cfg(target_os = "wasi")]
+                            let is_noexec = e == ERRNO_NOEXEC.raw() as i32;
 
-                        // TODO: we should not unwrap here
-                        let (exit_status, child_pid) =
-                            spawn(args_[0], &args_[1..], env, background, redirects).unwrap();
+                            #[cfg(not(target_os = "wasi"))]
+                            let is_noexec = e == Errno::ENOEXEC as i32;
 
-                        if background {
-                            self.last_job_pid = Some(child_pid as u32);
-                        }
+                            if is_noexec {
+                                let file = File::open(&path).expect("Cannot open executable:");
 
-                        Ok(exit_status)
-                    } else {
-                        // most likely WASM binary
-                        args.insert(0, path.into_os_string().into_string().unwrap());
-                        let args_: Vec<&str> = args.iter().map(|s| &**s).collect();
-                        match spawn(args_[0], &args_[1..], env, background, redirects) {
-                            // nonempty output message means that binary couldn't be executed
-                            Err(e) => {
+                                if file.metadata().unwrap().len() == 0 {
+                                    exit_status = EXIT_SUCCESS;
+                                } else {
+                                    let reader_result = BufReader::new(file).lines().next();
+
+                                    if let Some(Ok(_)) = reader_result {
+                                        // File starts with valid UTF-8 and might be a script,
+                                        // let's try to run it
+                                        let shell_path = env::var("SHELL").unwrap();
+
+                                        // TODO: We should not unwrap here
+                                        let (status, child_pid) =
+                                            spawn(&shell_path, &args_, env, background, redirects)
+                                                .unwrap();
+
+                                        if background {
+                                            self.last_job_pid = Some(child_pid as u32);
+                                        }
+
+                                        exit_status = status;
+                                        script_success = true;
+                                    }
+                                }
+                            }
+
+                            if !script_success {
                                 output_device.eprintln(&format!(
                                     "{}: could not execute binary (os error {})",
                                     env!("CARGO_PKG_NAME"),
                                     e
                                 ));
-                                Ok(EXIT_FAILURE)
                             }
-                            Ok((exit_status, child_pid)) => {
-                                if background {
-                                    self.last_job_pid = Some(child_pid as u32);
-                                }
-                                Ok(exit_status)
+
+                            Ok(exit_status)
+                        }
+                        Ok((exit_status, child_pid)) => {
+                            if background {
+                                self.last_job_pid = Some(child_pid as u32);
                             }
+                            Ok(exit_status)
                         }
                     }
                 }
