@@ -12,3 +12,8 @@ After completing the previous steps, with the following command you can build `w
 ```
 cargo +wasi_extended build --target wasm32-wasip1 --release
 ```
+
+If you want to compile for `wasm32-wasip1-threads` instead, you need to add required flags:
+```
+RUSTFLAGS="-C target-feature=-crt-static,+atomics,+bulk-memory,+mutable-globals -C link-arg=--max-memory=4294967296" cargo +wasi_extended build --target wasm32-wasip1-threads --release
+```
