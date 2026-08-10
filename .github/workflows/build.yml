@@ -3,7 +3,7 @@ name: build library
 on:
   push:
     branches:
-      - '**'
+      - "**"
   pull_request:
   workflow_call:
 
@@ -11,27 +11,40 @@ jobs:
   build-library:
     runs-on: ubuntu-latest
     container:
-      image: rust:1.91-slim-trixie
+      image: rust:1.93-slim-trixie
+    env:
+      DEBIAN_FRONTEND: "noninteractive"
+      WASI_SDK_VERSION: "33"
+      WASI_SDK_VERSION_FULL: "33.0"
+      WASI_SDK_PATH: "/opt/wasi-sdk"
+      CC: "/opt/wasi-sdk/bin/clang"
     steps:
       - name: Install dependencies
         run: |
-          apt-get update
-          apt-get install -y nodejs npm wget clang libclang-dev
-          wget -qO /opt/wasi-sdk-24.0.tar.gz https://github.com/WebAssembly/wasi-sdk/releases/download/wasi-sdk-24/wasi-sdk-24.0-x86_64-linux.tar.gz
-          mkdir -p /opt/wasi-sdk-24.0
-          tar -xf /opt/wasi-sdk-24.0.tar.gz --strip-components=1 -C /opt/wasi-sdk-24.0
-          echo "WASI_SDK_PATH=/opt/wasi-sdk-24.0" >> "$GITHUB_ENV"
+          apt-get -qqy update > /dev/null
+          apt-get -qqy install wget make clang libclang-dev git > /dev/null
+
+          WASI_URL="https://github.com/WebAssembly/wasi-sdk/releases/download/wasi-sdk-${WASI_SDK_VERSION}/wasi-sdk-${WASI_SDK_VERSION_FULL}-x86_64-linux.tar.gz"
+          wget -qO /tmp/wasi-sdk.tar.gz "$WASI_URL"
+          mkdir -p "${WASI_SDK_PATH}"
+          tar -xf /tmp/wasi-sdk.tar.gz --strip-components=1 -C "${WASI_SDK_PATH}"
+
           rustup target add wasm32-wasip1
+          rustup target add wasm32-wasip1-threads
           rustup component add rustfmt clippy
       - name: Checkout sources
-        uses: actions/checkout@v3
+        uses: actions/checkout@v7
       - name: Build native
         run: cargo build --release
-      - name: Build wasm32-wasip1
-        run: CC=${WASI_SDK_PATH}/bin/clang cargo build --target wasm32-wasip1 --release
+      - name: Build wasi
+        run: cargo build --target wasm32-wasip1 --release
+      - name: Build wasi threads
+        run: RUSTFLAGS="-C target-feature=-crt-static,+atomics,+bulk-memory,+mutable-globals -C link-arg=--max-memory=4294967296" cargo build --target wasm32-wasip1-threads --release
       - name: Lint native
-        run: cargo clippy -- -Dwarnings
+        run: cargo clippy --release -- -Dwarnings
       - name: Lint wasi
-        run: CC=${WASI_SDK_PATH}/bin/clang cargo clippy --target wasm32-wasip1 -- -Dwarnings
-      - name: Run Rust formater
+        run: |
+          cargo clippy --target wasm32-wasip1 --release -- -Dwarnings
+          cargo clippy --target wasm32-wasip1-threads --release -- -Dwarnings
+      - name: Format
         run: cargo fmt --check
