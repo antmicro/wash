@@ -16,6 +16,7 @@ jobs:
       DEBIAN_FRONTEND: "noninteractive"
       WASI_SDK_VERSION: "33"
       WASI_SDK_VERSION_FULL: "33.0"
+      WASI_SDK_HASH: "0ba8b5bfaeb2adf3f29bab5841d76cf5318ab8e1642ea195f88baba1abd47bce"
       WASI_SDK_PATH: "/opt/wasi-sdk"
       CC: "/opt/wasi-sdk/bin/clang"
     steps:
@@ -26,6 +27,7 @@ jobs:
 
           WASI_URL="https://github.com/WebAssembly/wasi-sdk/releases/download/wasi-sdk-${WASI_SDK_VERSION}/wasi-sdk-${WASI_SDK_VERSION_FULL}-x86_64-linux.tar.gz"
           wget -qO /tmp/wasi-sdk.tar.gz "$WASI_URL"
+          if [ "$(sha256sum /tmp/wasi-sdk.tar.gz | awk '{print $1}')" != "$WASI_SDK_HASH" ]; then echo "WASI SDK hash mismatch!" && exit 1; fi
           mkdir -p "${WASI_SDK_PATH}"
           tar -xf /tmp/wasi-sdk.tar.gz --strip-components=1 -C "${WASI_SDK_PATH}"
 
