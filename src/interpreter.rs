@@ -1053,7 +1053,7 @@ impl<'a, I: std::iter::Iterator<Item = char>> InputInterpreter<'a, I> {
                                 .join(" "),
                         )
                     } else {
-                        Some(String::from(" "))
+                        Some(String::from(""))
                     }
                 }
                 ast::Parameter::Pound => Some(format!(
