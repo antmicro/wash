@@ -27,6 +27,7 @@ use conch_parser::ast::{
     ComplexWord::Single,
     GuardBodyPair, PatternBodyPair,
     SimpleWord::Param,
+    SimpleWord::Subst,
     TopLevelCommand, TopLevelWord,
     Word::Simple,
 };
@@ -557,6 +558,63 @@ impl<'a, I: std::iter::Iterator<Item = char>> InputInterpreter<'a, I> {
         }
     }
 
+    fn expand_cmd_word(
+        shell: &mut Shell,
+        word: &ast::DefaultComplexWord,
+        text: &str,
+    ) -> Vec<String> {
+        match word {
+            Single(Simple(w @ (Param(_) | Subst(_)))) => Self::handle_simple_word(shell, text, w)
+                .map(|val| {
+                    val.split_whitespace()
+                        .map(String::from)
+                        .collect::<Vec<String>>()
+                })
+                .unwrap_or_default(),
+            _ => Self::handle_top_level_word(shell, word, text)
+                .into_iter()
+                .collect(),
+        }
+    }
+
+    fn expand_and_glob(
+        shell: &mut Shell,
+        word: &ast::DefaultComplexWord,
+        text: &str,
+    ) -> Vec<String> {
+        let words = Self::expand_cmd_word(shell, word, text);
+        let mut results = Vec::new();
+        for arg in words {
+            if let Ok(paths) = glob::glob_with(
+                &arg,
+                glob::MatchOptions {
+                    case_sensitive: true,
+                    require_literal_leading_dot: true,
+                    require_literal_separator: true,
+                },
+            ) {
+                let mut globbed = paths
+                    .map(|s| {
+                        if arg.starts_with("./") {
+                            // glob crate strips ./ prefix, if it is a bug, maybe we could fix it and submit a PR
+                            format!("./{}", s.unwrap().display())
+                        } else {
+                            s.unwrap().into_os_string().into_string().unwrap()
+                        }
+                    })
+                    .peekable();
+                if globbed.peek().is_none() {
+                    results.push(arg);
+                } else {
+                    results.extend(globbed);
+                }
+            } else {
+                results.push(arg);
+            }
+        }
+        results
+    }
+
     fn handle_compound_for(
         shell: &mut Shell,
         var: &String,
@@ -570,25 +628,7 @@ impl<'a, I: std::iter::Iterator<Item = char>> InputInterpreter<'a, I> {
         let mut finall_list: Vec<String> = vec![];
 
         for word in word_list {
-            match word {
-                TopLevelWord(Single(Simple(Param(_)))) => {
-                    if let TopLevelWord(Single(Simple(param_word))) = word {
-                        if let Some(value) = Self::handle_simple_word(shell, text, param_word) {
-                            finall_list.append(
-                                &mut value
-                                    .split_whitespace()
-                                    .map(String::from)
-                                    .collect::<Vec<String>>(),
-                            );
-                        }
-                    }
-                }
-                word => {
-                    if let Some(w) = Self::handle_top_level_word(shell, word, text) {
-                        finall_list.push(w);
-                    }
-                }
-            }
+            finall_list.extend(Self::expand_and_glob(shell, &word.0, text))
         }
 
         for word in finall_list {
@@ -758,34 +798,7 @@ impl<'a, I: std::iter::Iterator<Item = char>> InputInterpreter<'a, I> {
                     }
                 }
                 ast::RedirectOrCmdWord::CmdWord(cmd_word) => {
-                    if let Some(arg) = Self::handle_top_level_word(shell, &cmd_word.0, text) {
-                        if let Ok(paths) = glob::glob_with(
-                            &arg,
-                            glob::MatchOptions {
-                                case_sensitive: true,
-                                require_literal_leading_dot: true,
-                                require_literal_separator: true,
-                            },
-                        ) {
-                            let mut globbed = paths
-                                .map(|s| {
-                                    if arg.starts_with("./") {
-                                        // glob crate strips ./ prefix, if it is a bug, maybe we could fix it and submit a PR
-                                        format!("./{}", s.unwrap().display())
-                                    } else {
-                                        s.unwrap().into_os_string().into_string().unwrap()
-                                    }
-                                })
-                                .peekable();
-                            if globbed.peek().is_none() {
-                                args.push(arg);
-                            } else {
-                                args.extend(globbed);
-                            }
-                        } else {
-                            args.push(arg);
-                        }
-                    }
+                    args.extend(Self::expand_and_glob(shell, &cmd_word.0, text))
                 }
             }
         }
